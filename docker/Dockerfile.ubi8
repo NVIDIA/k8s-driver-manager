@@ -1,0 +1,37 @@
+# Copyright (c) 2019-2021, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+ARG CUDA_VERSION
+ARG BASE_DIST
+FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
+
+RUN dnf install -y kmod
+
+# Install K8s client to fetch node resources, cluster version and to perform cleanup of pods for driver unload
+RUN curl -o /usr/bin/kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl";
+RUN chmod a+x /usr/bin/kubectl
+
+COPY driver-manager /usr/local/bin
+
+LABEL io.k8s.display-name="NVIDIA Driver Upgrade Manager for Kubernetes"
+LABEL name="NVIDIA Driver Upgrade Manager for Kubernetes"
+LABEL vendor="NVIDIA"
+LABEL version="${VERSION}"
+LABEL release="N/A"
+LABEL summary="Manages upgrade of NVIDIA drivers on kubernetes"
+LABEL description="See summary"
+
+COPY LICENSE /licenses/LICENSE
+
+ENTRYPOINT ["driver-manager", "preflight_check"]

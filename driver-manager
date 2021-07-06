@@ -1,0 +1,238 @@
+#! /bin/bash
+# Copyright (c) 2019-2021, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+NODE_NAME=${NODE_NAME:?"Missing node name"}
+DRAIN_USE_FORCE=${DRAIN_USE_FORCE:-"false"}
+DRAIN_POD_SELECTOR_LABEL=${DRAIN_POD_SELECTOR_LABEL:-""}
+DRAIN_TIMEOUT_SECONDS=${DRAIN_TIMEOUT_SECONDS:-"0s"}
+DRAIN_DELETE_EMPTYDIR_DATA=${DRAIN_DELETE_EMPTYDIR_DATA:-"false"}
+DRIVER_PID_FILE=/run/nvidia/nvidia-driver.pid
+
+_drain_k8s_node() {
+    echo "Draining node ${NODE_NAME}..."
+    kubectl drain ${NODE_NAME} --ignore-daemonsets=true --force=${DRAIN_USE_FORCE} --pod-selector=${DRAIN_POD_SELECTOR_LABEL} --delete-emptydir-data=${DRAIN_DELETE_EMPTYDIR_DATA} --timeout=${DRAIN_TIMEOUT_SECONDS}
+}
+
+_evict_gpu_operator_components() {
+    echo "Shutting down all GPU clients on the current node by disabling their component-specific nodeSelector labels"
+    kubectl label --overwrite \
+        node ${NODE_NAME} \
+        nvidia.com/gpu.deploy.operator-validator=false \
+        nvidia.com/gpu.deploy.container-toolkit=false \
+        nvidia.com/gpu.deploy.device-plugin=false \
+        nvidia.com/gpu.deploy.gpu-feature-discovery=false \
+        nvidia.com/gpu.deploy.dcgm-exporter=false
+
+    if [ "$?" != "0" ]; then
+        return 1
+    fi
+
+    echo "Waiting for the operator-validator to shutdown"
+    kubectl wait --for=delete pod \
+        --timeout=5m \
+        --field-selector "spec.nodeName=${NODE_NAME}" \
+        -n gpu-operator-resources \
+        -l app=nvidia-operator-validator
+
+    echo "Waiting for the container-toolkit to shutdown"
+    kubectl wait --for=delete pod \
+        --timeout=5m \
+        --field-selector "spec.nodeName=${NODE_NAME}" \
+        -n gpu-operator-resources \
+        -l app=nvidia-container-toolkit-daemonset
+
+    echo "Waiting for the device-plugin to shutdown"
+    kubectl wait --for=delete pod \
+        --timeout=5m \
+        --field-selector "spec.nodeName=${NODE_NAME}" \
+        -n gpu-operator-resources \
+        -l app=nvidia-device-plugin-daemonset
+
+    echo "Waiting for gpu-feature-discovery to shutdown"
+    kubectl wait --for=delete pod \
+        --timeout=5m \
+        --field-selector "spec.nodeName=${NODE_NAME}" \
+        -n gpu-operator-resources \
+        -l app=gpu-feature-discovery
+
+    echo "Waiting for dcgm-exporter to shutdown"
+    kubectl wait --for=delete pod \
+        --timeout=5m \
+        --field-selector "spec.nodeName=${NODE_NAME}" \
+        -n gpu-operator-resources \
+        -l app=nvidia-dcgm-exporter
+    return 0
+}
+
+_uncordon_k8s_node() {
+    echo "Uncordoning node ${NODE_NAME}..."
+    kubectl uncordon ${NODE_NAME}
+    if [ "$?" != "0" ]; then
+        return 1
+    fi
+    return 0
+}
+
+_reschedule_gpu_operator_components() {
+    echo "Rescheduling all GPU clients on the current node by enabling their component-specific nodeSelector labels"
+    kubectl label --overwrite \
+        node ${NODE_NAME} \
+        nvidia.com/gpu.deploy.operator-validator=true \
+        nvidia.com/gpu.deploy.container-toolkit=true \
+        nvidia.com/gpu.deploy.device-plugin=true \
+        nvidia.com/gpu.deploy.gpu-feature-discovery=true \
+        nvidia.com/gpu.deploy.dcgm-exporter=true
+    if [ "$?" != "0" ]; then
+        return 1
+    fi
+    return 0
+}
+
+_driver_busy() {
+    local nvidia_refs=0
+    if [ -f /sys/module/nvidia/refcnt ]; then
+        nvidia_refs=$(< /sys/module/nvidia/refcnt)
+    fi
+    if [ ${nvidia_refs} -gt 2 ]; then
+        echo "nvidia driver module is already loaded with refcount ${nvidia_refs}"
+        return 0
+    fi
+    return 1
+}
+
+_exit_failed() {
+    # below commands are no-op if node is already in desired state
+    _uncordon_k8s_node
+    _reschedule_gpu_operator_components
+    exit 1
+}
+
+_exit_success() {
+    # below commands are no-op if node is already in desired state
+    _uncordon_k8s_node
+    _reschedule_gpu_operator_components
+    exit 0
+}
+
+uninstall_driver() {
+    if _driver_busy; then
+        # check if we can cleanup driver modules by just shutting down gpu-operator pods
+        _evict_gpu_operator_components || _exit_failed
+        _cleanup_driver
+        if [ "$?" != "0" ]; then
+            echo "Unable to cleanup driver modules, attempting again with node drain..."
+            trap '_exit_failed' ERR
+            _drain_k8s_node
+            _cleanup_driver
+        fi
+        echo "Successfully uninstalled nvidia driver components"
+        _exit_success
+    fi
+}
+
+preflight_check() {
+    # TODO: add checks for driver package availability for current kernel
+    # TODO: add checks for driver dependencies
+    # TODO: add checks for entitlements(OCP)
+    exit 0
+}
+
+# Unload the kernel modules if they are currently loaded.
+_unload_driver() {
+    local rmmod_args=()
+    local nvidia_deps=0
+    local nvidia_refs=0
+    local nvidia_uvm_refs=0
+    local nvidia_modeset_refs=0
+
+    echo "Unloading NVIDIA driver kernel modules..."
+    if [ -f /sys/module/nvidia_modeset/refcnt ]; then
+        nvidia_modeset_refs=$(< /sys/module/nvidia_modeset/refcnt)
+        rmmod_args+=("nvidia-modeset")
+        ((++nvidia_deps))
+    fi
+    if [ -f /sys/module/nvidia_uvm/refcnt ]; then
+        nvidia_uvm_refs=$(< /sys/module/nvidia_uvm/refcnt)
+        rmmod_args+=("nvidia-uvm")
+        ((++nvidia_deps))
+    fi
+    if [ -f /sys/module/nvidia/refcnt ]; then
+        nvidia_refs=$(< /sys/module/nvidia/refcnt)
+        rmmod_args+=("nvidia")
+    fi
+    if [ ${nvidia_refs} -gt ${nvidia_deps} ] || [ ${nvidia_uvm_refs} -gt 0 ] || [ ${nvidia_modeset_refs} -gt 0 ]; then
+        echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
+        return 1
+    fi
+
+    if [ ${#rmmod_args[@]} -gt 0 ]; then
+        rmmod ${rmmod_args[@]}
+        if [ "$?" != "0" ]; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Unmount the driver rootfs from the run directory.
+_unmount_rootfs() {
+    echo "Unmounting NVIDIA driver rootfs..."
+    if findmnt -r -o TARGET | grep "/run/nvidia/driver" > /dev/null; then
+        umount -l -R /run/nvidia/driver
+        return 0
+    fi
+    return 1
+}
+
+_cleanup_driver() {
+    _unmount_rootfs
+    if [ "$?" != "0" ]; then
+        return 1
+    fi
+    _unload_driver
+    if [ "$?" != "0" ]; then
+        return 1
+    fi
+    if [ -f ${DRIVER_PID_FILE} ]; then
+        rm -f ${DRIVER_PID_FILE}
+    fi
+    return 0
+}
+
+usage() {
+    cat >&2 <<EOF
+Usage: $0 COMMAND [ARG...]
+
+Commands:
+  uninstall_driver
+  preflight_check
+EOF
+    exit 1
+}
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+command=$1; shift
+case "${command}" in
+    uninstall_driver) ;;
+    preflight_check) ;;
+    *) usage ;;
+esac
+if [ $? -ne 0 ]; then
+    usage
+fi
+
+$command
