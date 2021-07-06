@@ -1,0 +1,40 @@
+# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+include:
+  - local: '.common-ci.yml'
+
+stages:
+  - build
+  - test
+  - deploy
+  - release
+
+# A base step for defining integration tests. This invokes the test-DIST make target.
+.integration:
+  stage: test
+  variables:
+    VERSION: "${CI_COMMIT_SHA}"
+    IMAGE: "${IMAGE_NAME}"
+  except:
+    variables:
+    - $CI_COMMIT_MESSAGE =~ /\[skip[ _-]tests?\]/i
+    - $SKIP_TESTS
+  before_script:
+    - apk add make bash jq
+    - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" "${CI_REGISTRY}"
+    - docker pull "${CI_REGISTRY_IMAGE}/${IMAGE_NAME}:${VERSION}-${DIST}"
+    - docker tag "${CI_REGISTRY_IMAGE}/${IMAGE_NAME}:${VERSION}-${DIST}" "${IMAGE_NAME}:${VERSION}-${DIST}"
+  script:
+    - make test-${DIST}
