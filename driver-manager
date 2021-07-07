@@ -33,7 +33,8 @@ _evict_gpu_operator_components() {
         nvidia.com/gpu.deploy.container-toolkit=false \
         nvidia.com/gpu.deploy.device-plugin=false \
         nvidia.com/gpu.deploy.gpu-feature-discovery=false \
-        nvidia.com/gpu.deploy.dcgm-exporter=false
+        nvidia.com/gpu.deploy.dcgm-exporter=false \
+        nvidia.com/gpu.deploy.dcgm=false
 
     if [ "$?" != "0" ]; then
         return 1
@@ -93,7 +94,8 @@ _reschedule_gpu_operator_components() {
         nvidia.com/gpu.deploy.container-toolkit=true \
         nvidia.com/gpu.deploy.device-plugin=true \
         nvidia.com/gpu.deploy.gpu-feature-discovery=true \
-        nvidia.com/gpu.deploy.dcgm-exporter=true
+        nvidia.com/gpu.deploy.dcgm-exporter=true \
+        nvidia.com/gpu.deploy.dcgm=true
     if [ "$?" != "0" ]; then
         return 1
     fi
