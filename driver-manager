@@ -107,7 +107,7 @@ _driver_busy() {
     if [ -f /sys/module/nvidia/refcnt ]; then
         nvidia_refs=$(< /sys/module/nvidia/refcnt)
     fi
-    if [ ${nvidia_refs} -gt 2 ]; then
+    if [ ${nvidia_refs} -gt 0 ]; then
         echo "nvidia driver module is already loaded with refcount ${nvidia_refs}"
         return 0
     fi
@@ -199,11 +199,11 @@ _unmount_rootfs() {
 }
 
 _cleanup_driver() {
-    _unmount_rootfs
+    _unload_driver
     if [ "$?" != "0" ]; then
         return 1
     fi
-    _unload_driver
+    _unmount_rootfs
     if [ "$?" != "0" ]; then
         return 1
     fi
