@@ -18,11 +18,20 @@ DRAIN_USE_FORCE=${DRAIN_USE_FORCE:-"false"}
 DRAIN_POD_SELECTOR_LABEL=${DRAIN_POD_SELECTOR_LABEL:-""}
 DRAIN_TIMEOUT_SECONDS=${DRAIN_TIMEOUT_SECONDS:-"0s"}
 DRAIN_DELETE_EMPTYDIR_DATA=${DRAIN_DELETE_EMPTYDIR_DATA:-"false"}
+ENABLE_AUTO_DRAIN=${ENABLE_AUTO_DRAIN:-"true"}
 DRIVER_PID_FILE=/run/nvidia/nvidia-driver.pid
 
 _drain_k8s_node() {
     echo "Draining node ${NODE_NAME}..."
     kubectl drain ${NODE_NAME} --ignore-daemonsets=true --force=${DRAIN_USE_FORCE} --pod-selector=${DRAIN_POD_SELECTOR_LABEL} --delete-emptydir-data=${DRAIN_DELETE_EMPTYDIR_DATA} --timeout=${DRAIN_TIMEOUT_SECONDS}
+}
+
+_is_auto_drain_enabled() {
+    if [ "${ENABLE_AUTO_DRAIN}" = "true" ]; then
+        return 0
+    fi
+    echo "Auto drain of the node ${NODE_NAME} is disabled"
+    return 1
 }
 
 _evict_gpu_operator_components() {
@@ -134,10 +143,15 @@ uninstall_driver() {
         _evict_gpu_operator_components || _exit_failed
         _cleanup_driver
         if [ "$?" != "0" ]; then
-            echo "Unable to cleanup driver modules, attempting again with node drain..."
-            trap '_exit_failed' ERR
-            _drain_k8s_node
-            _cleanup_driver
+            if _is_auto_drain_enabled; then
+                echo "Unable to cleanup driver modules, attempting again with node drain..."
+                trap '_exit_failed' ERR
+                _drain_k8s_node
+                _cleanup_driver
+            else
+                echo "Failed to uninstall nvidia driver components"
+                _exit_failed
+            fi
         fi
         echo "Successfully uninstalled nvidia driver components"
         _exit_success
