@@ -18,7 +18,7 @@
 
 ##### Global variables #####
 
-CUDA_VERSION ?= 11.3.0
+CUDA_VERSION ?= 11.4.1
 DOCKER ?= docker
 ifeq ($(IMAGE),)
 REGISTRY ?= nvidia
