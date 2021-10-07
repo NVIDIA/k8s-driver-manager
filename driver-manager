@@ -123,6 +123,25 @@ _driver_busy() {
     return 1
 }
 
+_nouveau_loaded() {
+    if [ -f /sys/module/nouveau/refcnt ]; then
+        return 0
+    fi
+    return 1
+}
+
+_unload_nouveau() {
+    if [ -f /sys/module/nouveau/refcnt ]; then
+        echo "Unloading nouveau driver..."
+        rmmod nouveau
+        if [ "$?" != "0" ]; then
+            echo "Failed to unload nouveau driver"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 _exit_failed() {
     # below commands are no-op if node is already in desired state
     _uncordon_k8s_node
@@ -155,6 +174,16 @@ uninstall_driver() {
         fi
         echo "Successfully uninstalled nvidia driver components"
         _exit_success
+    fi
+
+    # check for nouveau driver and unload it before driver nvidia installation
+    if _nouveau_loaded; then
+        _unload_nouveau
+        if [ "$?" != "0" ]; then
+            exit 1
+        fi
+        echo "Successfully unloaded nouveau driver"
+        exit 0
     fi
 }
 
