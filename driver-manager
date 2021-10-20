@@ -173,7 +173,8 @@ uninstall_driver() {
             fi
         fi
         echo "Successfully uninstalled nvidia driver components"
-        _exit_success
+        _uncordon_k8s_node
+        _reschedule_gpu_operator_components
     fi
 
     # check for nouveau driver and unload it before driver nvidia installation
@@ -183,8 +184,8 @@ uninstall_driver() {
             exit 1
         fi
         echo "Successfully unloaded nouveau driver"
-        exit 0
     fi
+    exit 0
 }
 
 preflight_check() {
