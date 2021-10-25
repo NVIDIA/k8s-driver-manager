@@ -20,6 +20,7 @@ DRAIN_TIMEOUT_SECONDS=${DRAIN_TIMEOUT_SECONDS:-"0s"}
 DRAIN_DELETE_EMPTYDIR_DATA=${DRAIN_DELETE_EMPTYDIR_DATA:-"false"}
 ENABLE_AUTO_DRAIN=${ENABLE_AUTO_DRAIN:-"true"}
 DRIVER_PID_FILE=/run/nvidia/nvidia-driver.pid
+OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-"gpu-operator-resources"}
 
 _drain_k8s_node() {
     echo "Draining node ${NODE_NAME}..."
@@ -53,35 +54,35 @@ _evict_gpu_operator_components() {
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n gpu-operator-resources \
+        -n ${OPERATOR_NAMESPACE} \
         -l app=nvidia-operator-validator
 
     echo "Waiting for the container-toolkit to shutdown"
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n gpu-operator-resources \
+        -n ${OPERATOR_NAMESPACE} \
         -l app=nvidia-container-toolkit-daemonset
 
     echo "Waiting for the device-plugin to shutdown"
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n gpu-operator-resources \
+        -n ${OPERATOR_NAMESPACE} \
         -l app=nvidia-device-plugin-daemonset
 
     echo "Waiting for gpu-feature-discovery to shutdown"
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n gpu-operator-resources \
+        -n ${OPERATOR_NAMESPACE} \
         -l app=gpu-feature-discovery
 
     echo "Waiting for dcgm-exporter to shutdown"
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n gpu-operator-resources \
+        -n ${OPERATOR_NAMESPACE} \
         -l app=nvidia-dcgm-exporter
     return 0
 }
