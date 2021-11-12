@@ -28,6 +28,7 @@ DCGM_DEPLOYED=""
 DCGM_EXPORTER_DEPLOYED=""
 TOOLKIT_DEPLOYED=""
 VALIDATOR_DEPLOYED=""
+MIG_MANAGER_DEPLOYED=""
 
 _drain_k8s_node() {
     echo "Draining node ${NODE_NAME}..."
@@ -131,6 +132,15 @@ _fetch_current_labels() {
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.dcgm=${DCGM_DEPLOYED}'"
+
+    echo "Getting current value of the 'nvidia.com/gpu.deploy.mig-manager' node label"
+    MIG_MANAGER_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.mig-manager}')
+    if [ "${?}" != "0" ]; then
+        echo "Unable to get the value of the 'nvidia.com/gpu.deploy.mig-manager' label"
+        exit 1
+    fi
+    echo "Current value of 'nvidia.com/gpu.deploy.mig-manager=${MIG_MANAGER_DEPLOYED}'"
+
 }
 
 _evict_gpu_operator_components() {
@@ -142,7 +152,8 @@ _evict_gpu_operator_components() {
         nvidia.com/gpu.deploy.device-plugin=$(_maybe_set_paused ${PLUGIN_DEPLOYED}) \
         nvidia.com/gpu.deploy.gpu-feature-discovery=$(_maybe_set_paused ${GFD_DEPLOYED}) \
         nvidia.com/gpu.deploy.dcgm-exporter=$(_maybe_set_paused ${DCGM_EXPORTER_DEPLOYED}) \
-        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_paused ${DCGM_DEPLOYED})
+        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_paused ${DCGM_DEPLOYED}) \
+        nvidia.com/gpu.deploy.mig-manager=$(_maybe_set_paused ${MIG_MANAGER_DEPLOYED})
 
     if [ "$?" != "0" ]; then
         return 1
@@ -190,6 +201,13 @@ _evict_gpu_operator_components() {
         -n ${OPERATOR_NAMESPACE} \
         -l app=nvidia-dcgm
 
+    echo "Waiting for mig-manager to shutdown"
+    kubectl wait --for=delete pod \
+        --timeout=5m \
+        --field-selector "spec.nodeName=${NODE_NAME}" \
+        -n ${OPERATOR_NAMESPACE} \
+        -l app=nvidia-mig-manager
+
     return 0
 }
 
@@ -211,7 +229,8 @@ _reschedule_gpu_operator_components() {
         nvidia.com/gpu.deploy.device-plugin=$(_maybe_set_true ${PLUGIN_DEPLOYED}) \
         nvidia.com/gpu.deploy.gpu-feature-discovery=$(_maybe_set_true ${GFD_DEPLOYED}) \
         nvidia.com/gpu.deploy.dcgm-exporter=$(_maybe_set_true ${DCGM_EXPORTER_DEPLOYED}) \
-        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_true ${DCGM_DEPLOYED})
+        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_true ${DCGM_DEPLOYED}) \
+        nvidia.com/gpu.deploy.mig-manager=$(_maybe_set_true ${MIG_MANAGER_DEPLOYED})
 
     if [ "$?" != "0" ]; then
         return 1
