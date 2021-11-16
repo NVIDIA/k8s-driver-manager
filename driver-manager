@@ -52,7 +52,10 @@ _is_auto_drain_enabled() {
 # we want to honor it's existing value and not change it.
 _maybe_set_paused() {
     local current_value="${1}"
-    if [  "${current_value}" = "false" ]; then
+    if [  "${current_value}" = "" ]; then
+        # disabled by user with empty value, retain it
+        echo ""
+    elif [  "${current_value}" = "false" ]; then
         # disabled by user
         echo "false"
     elif [  "${current_value}" = "true" ]; then
@@ -152,11 +155,19 @@ _evict_gpu_operator_components() {
         nvidia.com/gpu.deploy.device-plugin=$(_maybe_set_paused ${PLUGIN_DEPLOYED}) \
         nvidia.com/gpu.deploy.gpu-feature-discovery=$(_maybe_set_paused ${GFD_DEPLOYED}) \
         nvidia.com/gpu.deploy.dcgm-exporter=$(_maybe_set_paused ${DCGM_EXPORTER_DEPLOYED}) \
-        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_paused ${DCGM_DEPLOYED}) \
-        nvidia.com/gpu.deploy.mig-manager=$(_maybe_set_paused ${MIG_MANAGER_DEPLOYED})
+        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_paused ${DCGM_DEPLOYED})
 
     if [ "$?" != "0" ]; then
         return 1
+    fi
+
+    if [ "${MIG_MANAGER_DEPLOYED}" != "" ]; then
+        kubectl label --overwrite \
+            node ${NODE_NAME} \
+            nvidia.com/gpu.deploy.mig-manager=$(_maybe_set_paused ${MIG_MANAGER_DEPLOYED})
+        if [ "$?" != "0" ]; then
+            return 1
+        fi
     fi
 
     echo "Waiting for the operator-validator to shutdown"
@@ -201,12 +212,14 @@ _evict_gpu_operator_components() {
         -n ${OPERATOR_NAMESPACE} \
         -l app=nvidia-dcgm
 
-    echo "Waiting for mig-manager to shutdown"
-    kubectl wait --for=delete pod \
-        --timeout=5m \
-        --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n ${OPERATOR_NAMESPACE} \
-        -l app=nvidia-mig-manager
+    if [ "${MIG_MANAGER_DEPLOYED}" != "" ]; then
+        echo "Waiting for mig-manager to shutdown"
+        kubectl wait --for=delete pod \
+            --timeout=5m \
+            --field-selector "spec.nodeName=${NODE_NAME}" \
+            -n ${OPERATOR_NAMESPACE} \
+            -l app=nvidia-mig-manager
+    fi
 
     return 0
 }
@@ -229,11 +242,19 @@ _reschedule_gpu_operator_components() {
         nvidia.com/gpu.deploy.device-plugin=$(_maybe_set_true ${PLUGIN_DEPLOYED}) \
         nvidia.com/gpu.deploy.gpu-feature-discovery=$(_maybe_set_true ${GFD_DEPLOYED}) \
         nvidia.com/gpu.deploy.dcgm-exporter=$(_maybe_set_true ${DCGM_EXPORTER_DEPLOYED}) \
-        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_true ${DCGM_DEPLOYED}) \
-        nvidia.com/gpu.deploy.mig-manager=$(_maybe_set_true ${MIG_MANAGER_DEPLOYED})
+        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_true ${DCGM_DEPLOYED})
 
     if [ "$?" != "0" ]; then
         return 1
+    fi
+
+    if [ "${MIG_MANAGER_DEPLOYED}" != "" ]; then
+        kubectl label --overwrite \
+            node ${NODE_NAME} \
+            nvidia.com/gpu.deploy.mig-manager=$(_maybe_set_true ${MIG_MANAGER_DEPLOYED})
+        if [ "$?" != "0" ]; then
+            return 1
+        fi
     fi
     return 0
 }
