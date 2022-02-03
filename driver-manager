@@ -327,8 +327,11 @@ uninstall_driver() {
         echo "Successfully uninstalled nvidia driver components"
     fi
 
-    # always uncordon/reschedule operator components in case if the pod has restarted abruptly
-    _uncordon_k8s_node
+    if _is_auto_drain_enabled; then
+        # uncordon the node in case if the pod has restarted abruptly after we cordoned the node
+        _uncordon_k8s_node
+    fi
+    # always reschedule operator components in case if the pod has restarted abruptly after evicting pods
     _reschedule_gpu_operator_components
 
     # check for nouveau driver and unload it before driver nvidia installation
