@@ -15,26 +15,21 @@
 include:
   - local: '.common-ci.yml'
 
-stages:
-  - build
-  - test
-  - deploy
-  - release
-
-# A base step for defining integration tests. This invokes the test-DIST make target.
-.integration:
-  stage: test
+# Define the image build targets
+.image-build:
+  stage: image-build
   variables:
-    VERSION: "${CI_COMMIT_SHA}"
-    IMAGE: "${IMAGE_NAME}"
-  except:
-    variables:
-    - $CI_COMMIT_MESSAGE =~ /\[skip[ _-]tests?\]/i
-    - $SKIP_TESTS
+    IMAGE_NAME: "${CI_REGISTRY_IMAGE}"
+    VERSION: "${CI_COMMIT_SHORT_SHA}"
   before_script:
-    - apk add make bash jq
+    - apk add --no-cache bash make
+    - 'echo "Logging in to CI registry ${CI_REGISTRY}"'
     - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" "${CI_REGISTRY}"
-    - docker pull "${CI_REGISTRY_IMAGE}/${IMAGE_NAME}:${VERSION}-${DIST}"
-    - docker tag "${CI_REGISTRY_IMAGE}/${IMAGE_NAME}:${VERSION}-${DIST}" "${IMAGE_NAME}:${VERSION}-${DIST}"
   script:
-    - make test-${DIST}
+    - make build-${DIST}
+    - make push-${DIST}
+
+image-ubi8:
+  extends:
+    - .image-build
+    - .dist-ubi8
