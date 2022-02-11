@@ -38,14 +38,14 @@ OUT_IMAGE_TAG = $(OUT_IMAGE_VERSION)-$(DIST)
 OUT_IMAGE = $(OUT_IMAGE_NAME):$(OUT_IMAGE_TAG)
 
 ##### Public rules #####
-TARGETS := ubi8
+DISTRIBUTIONS := ubi8
 DEFAULT_PUSH_TARGET := ubi8
 
-PUSH_TARGETS := $(patsubst %, push-%, $(TARGETS))
-BUILD_TARGETS := $(patsubst %, build-%, $(TARGETS))
-TEST_TARGETS := $(patsubst %, build-%, $(TARGETS))
+PUSH_TARGETS := $(patsubst %, push-%, $(DISTRIBUTIONS))
+BUILD_TARGETS := $(patsubst %, build-%, $(DISTRIBUTIONS))
+TEST_TARGETS := $(patsubst %, build-%, $(DISTRIBUTIONS))
 
-.PHONY: $(TARGETS) $(PUSH_TARGETS) $(BUILD_TARGETS) $(TEST_TARGETS)
+.PHONY: $(DISTRIBUTIONS) $(PUSH_TARGETS) $(BUILD_TARGETS) $(TEST_TARGETS)
 
 ifneq ($(BUILD_MULTI_ARCH_IMAGES),true)
 include $(CURDIR)/deployments/container/native-only.mk
@@ -69,7 +69,7 @@ build-%: DOCKERFILE_SUFFIX = $(*)
 build-%: DOCKERFILE = $(CURDIR)/deployments/container/Dockerfile.$(DOCKERFILE_SUFFIX)
 
 # Both ubi8 and build-ubi8 trigger a build of the relevant image
-$(TARGETS): %: build-%
+$(DISTRIBUTIONS): %: build-%
 $(BUILD_TARGETS): build-%:
 	DOCKER_BUILDKIT=1 \
 		$(DOCKER) $(BUILDX) build --pull \
