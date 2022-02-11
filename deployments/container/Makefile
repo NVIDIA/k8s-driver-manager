@@ -48,9 +48,9 @@ TEST_TARGETS := $(patsubst %, build-%, $(TARGETS))
 .PHONY: $(TARGETS) $(PUSH_TARGETS) $(BUILD_TARGETS) $(TEST_TARGETS)
 
 ifneq ($(BUILD_MULTI_ARCH_IMAGES),true)
-include $(CURDIR)/native-only.mk
+include $(CURDIR)/deployments/container/native-only.mk
 else
-include $(CURDIR)/multi-arch.mk
+include $(CURDIR)/deployments/container/multi-arch.mk
 endif
 
 # For the default push target we also push a short tag equal to the version.
@@ -66,7 +66,7 @@ push-short: DIST = $(DEFAULT_PUSH_TARGET)
 
 build-%: DIST = $(*)
 build-%: DOCKERFILE_SUFFIX = $(*)
-build-%: DOCKERFILE = $(CURDIR)/docker/Dockerfile.$(DOCKERFILE_SUFFIX)
+build-%: DOCKERFILE = $(CURDIR)/deployments/container/Dockerfile.$(DOCKERFILE_SUFFIX)
 
 # Both ubi8 and build-ubi8 trigger a build of the relevant image
 $(TARGETS): %: build-%

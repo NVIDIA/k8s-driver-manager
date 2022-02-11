@@ -60,7 +60,7 @@ stages:
     - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" "${CI_REGISTRY}"
     - docker pull "${IMAGE_NAME}:${VERSION}-${DIST}"
   script:
-    - make test-${DIST}
+    - make -f deployments/container/Makefile test-${DIST}
 
 # Download the regctl binary for use in the release steps
 .regctl-setup:
@@ -99,7 +99,7 @@ stages:
 
     # Since OUT_IMAGE_NAME and OUT_IMAGE_VERSION are set, this will push the CI image to the
     # Target
-    - make push-${DIST}
+    - make -f deployments/container/Makefile push-${DIST}
 
 # Define a staging release step that pushes an image to an internal "staging" repository
 # This is triggered for all pipelines (i.e. not only tags) to test the pipeline steps
