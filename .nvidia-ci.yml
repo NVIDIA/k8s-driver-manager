@@ -48,8 +48,8 @@ variables:
     OUT_IMAGE_NAME: "${CI_REGISTRY_IMAGE}"
   # We delay the job start to allow the public pipeline to generate the required images.
   when: delayed
-  start_in: 10 minutes
-  timeout: 10 minutes
+  start_in: 30 minutes
+  timeout: 30 minutes
   retry:
     max: 2
     when:
