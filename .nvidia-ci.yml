@@ -1,4 +1,4 @@
-# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2021-2022, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,11 +17,12 @@ include:
 
 default:
   tags:
-    - type/docker
-    - docker/privileged
     - cnt
     - container-dev
+    - docker/multi-arch
+    - docker/privileged
     - os/linux
+    - type/docker
 
 variables:
   DOCKER_DRIVER: overlay2
@@ -29,13 +30,52 @@ variables:
   # Release "devel"-tagged images off the master branch
   # RELEASE_DEVEL_BRANCH: "master"
   RELEASE_DEVEL_TAG: "devel"
+  # On the multi-arch builder we don't need the qemu setup.
+  SKIP_QEMU_SETUP: "1"
+  # Define the public staging registry
+  STAGING_REGISTRY: registry.gitlab.com/nvidia/cloud-native/k8s-driver-manager/staging
+  STAGING_VERSION: ${CI_COMMIT_SHORT_SHA}
 
-stages:
-  - build
-  - test
-  - scan
-  - deploy
-  - release
+.image-pull:
+  stage: image-build
+  variables:
+    IN_REGISTRY: "${STAGING_REGISTRY}"
+    IN_IMAGE_NAME: k8s-driver-manager
+    IN_VERSION: "${STAGING_VERSION}"
+    OUT_REGISTRY_USER: "${CI_REGISTRY_USER}"
+    OUT_REGISTRY_TOKEN: "${CI_REGISTRY_PASSWORD}"
+    OUT_REGISTRY: "${CI_REGISTRY}"
+    OUT_IMAGE_NAME: "${CI_REGISTRY_IMAGE}"
+  # We delay the job start to allow the public pipeline to generate the required images.
+  when: delayed
+  start_in: 30 minutes
+  timeout: 30 minutes
+  retry:
+    max: 2
+    when:
+      - job_execution_timeout
+      - stuck_or_timeout_failure
+  before_script:
+    - !reference [.regctl-setup, before_script]
+    - apk add --no-cache make bash
+    - >
+      regctl manifest get ${IN_REGISTRY}/${IN_IMAGE_NAME}:${IN_VERSION}-${DIST} --list > /dev/null && echo "${IN_REGISTRY}/${IN_IMAGE_NAME}:${IN_VERSION}-${DIST}" || ( echo "${IN_REGISTRY}/${IN_IMAGE_NAME}:${IN_VERSION}-${DIST} does not exist" && sleep infinity )
+  script:
+    - regctl registry login "${OUT_REGISTRY}" -u "${OUT_REGISTRY_USER}" -p "${OUT_REGISTRY_TOKEN}"
+    - make -f deployments/container/Makefile IMAGE=${IN_REGISTRY}/${IN_IMAGE_NAME}:${IN_VERSION}-${DIST} OUT_IMAGE=${OUT_IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}-${DIST} push-${DIST}
+
+image-ubi8:
+  extends:
+    - .image-pull
+    - .dist-ubi8
+
+# We skip the integration tests for the internal CI:
+.integration:
+  stage: test
+  before_script:
+    - echo "Skipped in internal CI"
+  script:
+    - echo "Skipped in internal CI"
 
 # The .scan step forms the base of the image scan operation performed before releasing
 # images.
@@ -43,15 +83,15 @@ stages:
   stage: scan
   image: "${PULSE_IMAGE}"
   variables:
-    IMAGE: "${CI_REGISTRY_IMAGE}/${IMAGE_NAME}:${CI_COMMIT_SHA}-${DIST}"
+    IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}-${DIST}"
     IMAGE_ARCHIVE: "k8s-driver-manager.tar"
   except:
     variables:
     - $CI_COMMIT_MESSAGE =~ /\[skip[ _-]scans?\]/i
-    - $SKIP_SCANS
+    - $SKIP_SCANS && $SKIP_SCANS == "yes"
   before_script:
     - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" "${CI_REGISTRY}"
-    - docker pull "${IMAGE}"
+    - docker pull --platform="${PLATFORM}" "${IMAGE}"
     - docker save "${IMAGE}" -o "${IMAGE_ARCHIVE}"
     - AuthHeader=$(echo -n $SSA_CLIENT_ID:$SSA_CLIENT_SECRET | base64 -w0)
     - >
@@ -69,19 +109,40 @@ stages:
       - vulns.json
       - policy_evaluation.json
 
-scan-ubi8:
+# The .scan-ubi8 steps forms the base for all ubi8 image scans across supported architectures
+.scan-ubi8:
   extends:
     - .scan
-    - .target-ubi8
+    - .dist-ubi8
+  needs:
+    - image-ubi8
 
-# Define the external release steps for NGC and Dockerhub
+# Define the scan targets
+scan-ubi8-amd64:
+  extends:
+    - .scan-ubi8
+    - .platform-amd64
+
+scan-ubi8-arm64:
+  extends:
+    - .scan-ubi8
+    - .platform-arm64
+  # For now, run the scans sequentially to avoid any issues
+  # when pulling the same tag, but different arch, on the gitlab runner
+  needs:
+    - scan-ubi8-amd64
+
+# Define the external release helpers
 .release:ngc:
   extends: .release:external
   variables:
     OUT_REGISTRY_USER: "${NGC_REGISTRY_USER}"
     OUT_REGISTRY_TOKEN: "${NGC_REGISTRY_TOKEN}"
     OUT_REGISTRY: "${NGC_REGISTRY}"
-    OUT_IMAGE: "${NGC_REGISTRY_IMAGE}"
+    OUT_IMAGE_NAME: "${NGC_REGISTRY_IMAGE}"
+    # Disable external releases for now
+    DOCKER: echo
+    REGCTL: echo
 
 .release:dockerhub:
   extends: .release:external
@@ -89,20 +150,19 @@ scan-ubi8:
     OUT_REGISTRY_USER: "${REGISTRY_USER}"
     OUT_REGISTRY_TOKEN: "${REGISTRY_TOKEN}"
     OUT_REGISTRY: "${DOCKERHUB_REGISTRY}"
-    OUT_IMAGE: "${REGISTRY_IMAGE}"
+    OUT_IMAGE_NAME: "${REGISTRY_IMAGE}"
+    # Disable external releases for now
+    DOCKER: echo
+    REGCTL: echo
 
+# Define the external release targets
+# Release to NGC
 release:ngc-ubi8:
   extends:
     - .release:ngc
-    - .target-ubi8
-  dependencies:
-    - deploy:sha-ci-ubi8
-    - scan-ubi8
+    - .dist-ubi8
 
 release:dockerhub-ubi8:
   extends:
     - .release:dockerhub
-    - .target-ubi8
-  dependencies:
-    - deploy:sha-ci-ubi8
-    - scan-ubi8
+    - .dist-ubi8

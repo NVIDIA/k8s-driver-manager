@@ -12,25 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-include:
-  - local: '.common-ci.yml'
+VERSION ?= v0.2.1
 
-# Define the image build targets
-.image-build:
-  stage: image-build
-  variables:
-    IMAGE_NAME: "${CI_REGISTRY_IMAGE}"
-    VERSION: "${CI_COMMIT_SHORT_SHA}"
-    PUSH_ON_BUILD: "true"
-  before_script:
-    - !reference [.buildx-setup, before_script]
-    - apk add --no-cache bash make
-    - 'echo "Logging in to CI registry ${CI_REGISTRY}"'
-    - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" "${CI_REGISTRY}"
-  script:
-    - make -f deployments/container/Makefile build-${DIST}
+vVERSION := v$(VERSION:v%=%)
 
-image-ubi8:
-  extends:
-    - .image-build
-    - .dist-ubi8
+CUDA_VERSION := 11.6.0
