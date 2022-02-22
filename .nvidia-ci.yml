@@ -28,8 +28,8 @@ variables:
   DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: "/certs"
   # Release "devel"-tagged images off the master branch
-  # RELEASE_DEVEL_BRANCH: "master"
-  RELEASE_DEVEL_TAG: "devel"
+  RELEASE_DEVEL_BRANCH: "master"
+  DEVEL_RELEASE_IMAGE_VERSION: "devel"
   # On the multi-arch builder we don't need the qemu setup.
   SKIP_QEMU_SETUP: "1"
   # Define the public staging registry
@@ -46,6 +46,7 @@ variables:
     OUT_REGISTRY_TOKEN: "${CI_REGISTRY_PASSWORD}"
     OUT_REGISTRY: "${CI_REGISTRY}"
     OUT_IMAGE_NAME: "${CI_REGISTRY_IMAGE}"
+    PUSH_MULTIPLE_TAGS: "false"
   # We delay the job start to allow the public pipeline to generate the required images.
   when: delayed
   start_in: 30 minutes
@@ -140,9 +141,6 @@ scan-ubi8-arm64:
     OUT_REGISTRY_TOKEN: "${NGC_REGISTRY_TOKEN}"
     OUT_REGISTRY: "${NGC_REGISTRY}"
     OUT_IMAGE_NAME: "${NGC_REGISTRY_IMAGE}"
-    # Disable external releases for now
-    DOCKER: echo
-    REGCTL: echo
 
 .release:dockerhub:
   extends: .release:external
@@ -151,9 +149,6 @@ scan-ubi8-arm64:
     OUT_REGISTRY_TOKEN: "${REGISTRY_TOKEN}"
     OUT_REGISTRY: "${DOCKERHUB_REGISTRY}"
     OUT_IMAGE_NAME: "${REGISTRY_IMAGE}"
-    # Disable external releases for now
-    DOCKER: echo
-    REGCTL: echo
 
 # Define the external release targets
 # Release to NGC
