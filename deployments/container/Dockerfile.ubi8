@@ -16,10 +16,12 @@ ARG CUDA_VERSION
 ARG BASE_DIST
 FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
 
+ARG TARGETARCH
+
 RUN dnf install -y kmod
 
 # Install K8s client to fetch node resources, cluster version and to perform cleanup of pods for driver unload
-RUN curl -o /usr/bin/kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl";
+RUN OS_ARCH=${TARGETARCH/x86_64/amd64} && OS_ARCH=${OS_ARCH/aarch64/arm64} && curl -o /usr/bin/kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${OS_ARCH}/kubectl";
 RUN chmod a+x /usr/bin/kubectl
 
 COPY driver-manager /usr/local/bin
