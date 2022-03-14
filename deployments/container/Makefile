@@ -83,6 +83,7 @@ $(BUILD_TARGETS): build-%:
 			--build-arg BASE_DIST="$(DIST)" \
 			--build-arg CUDA_VERSION="$(CUDA_VERSION)" \
 			--build-arg VERSION="$(VERSION)" \
+			--build-arg CVE_UPDATES="$(CVE_UPDATES)" \
 			--file $(DOCKERFILE) \
 			$(CURDIR)
 
