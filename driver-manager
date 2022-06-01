@@ -19,6 +19,7 @@ DRAIN_POD_SELECTOR_LABEL=${DRAIN_POD_SELECTOR_LABEL:-""}
 DRAIN_TIMEOUT_SECONDS=${DRAIN_TIMEOUT_SECONDS:-"0s"}
 DRAIN_DELETE_EMPTYDIR_DATA=${DRAIN_DELETE_EMPTYDIR_DATA:-"false"}
 ENABLE_AUTO_DRAIN=${ENABLE_AUTO_DRAIN:-"true"}
+DRIVER_ROOT=/run/nvidia/driver
 DRIVER_PID_FILE=/run/nvidia/nvidia-driver.pid
 OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-"gpu-operator-resources"}
 PAUSED_STR="paused-for-driver-upgrade"
@@ -30,6 +31,9 @@ NVSM_DEPLOYED=""
 TOOLKIT_DEPLOYED=""
 VALIDATOR_DEPLOYED=""
 MIG_MANAGER_DEPLOYED=""
+SANDBOX_VALIDATOR_DEPLOYED=""
+SANDBOX_PLUGIN_DEPLOYED=""
+VGPU_DEVICE_MANAGER_DEPLOYED=""
 
 _drain_k8s_node() {
     echo "Draining node ${NODE_NAME}..."
@@ -152,9 +156,84 @@ _fetch_current_labels() {
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.nvsm=${NVSM_DEPLOYED}'"
+
+    echo "Getting current value of the 'nvidia.com/gpu.deploy.sandbox-validator' node label"
+    SANDBOX_VALIDATOR_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.sandbox-validator}')
+    if [ "${?}" != "0" ]; then
+        echo "Unable to get the value of the 'nvidia.com/gpu.deploy.sandbox-validator' label"
+        exit 1
+    fi
+    echo "Current value of 'nvidia.com/gpu.deploy.sandbox-validator=${SANDBOX_VALIDATOR_DEPLOYED}'"
+
+    echo "Getting current value of the 'nvidia.com/gpu.deploy.sandbox-device-plugin' node label"
+    SANDBOX_PLUGIN_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.sandbox-device-plugin}')
+    if [ "${?}" != "0" ]; then
+        echo "Unable to get the value of the 'nvidia.com/gpu.deploy.sandbox-device-plugin' label"
+        exit 1
+    fi
+    echo "Current value of 'nvidia.com/gpu.deploy.sandbox-device-plugin=${SANDBOX_PLUGIN_DEPLOYED}'"
+
+    echo "Getting current value of the 'nvidia.com/gpu.deploy.vgpu-device-manager' node label"
+    VGPU_DEVICE_MANAGER_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.vgpu-device-manager}')
+    if [ "${?}" != "0" ]; then
+        echo "Unable to get the value of the 'nvidia.com/gpu.deploy.vgpu-device-manager' label"
+        exit 1
+    fi
+    echo "Current value of 'nvidia.com/gpu.deploy.vgpu-device-manager=${VGPU_DEVICE_MANAGER_DEPLOYED}'"
+
 }
 
-_evict_gpu_operator_components() {
+_evict_required_gpu_operator_components() {
+    echo "Shutting GPU Operator components that must be restarted on driver restarts by disabling their component-specific nodeSelector labels"
+    kubectl label --overwrite \
+        node ${NODE_NAME} \
+        nvidia.com/gpu.deploy.operator-validator=$(_maybe_set_paused ${VALIDATOR_DEPLOYED}) \
+        nvidia.com/gpu.deploy.sandbox-validator=$(_maybe_set_paused ${SANDBOX_VALIDATOR_DEPLOYED}) \
+        nvidia.com/gpu.deploy.sandbox-device-plugin=$(_maybe_set_paused ${SANDBOX_PLUGIN_DEPLOYED}) \
+        nvidia.com/gpu.deploy.vgpu-device-manager=$(_maybe_set_paused ${VGPU_DEVICE_MANAGER_DEPLOYED})
+
+    if [ "$?" != "0" ]; then
+        return 1
+    fi
+
+    echo "Waiting for the operator-validator to shutdown"
+    kubectl wait --for=delete pod \
+        --timeout=5m \
+        --field-selector "spec.nodeName=${NODE_NAME}" \
+        -n ${OPERATOR_NAMESPACE} \
+        -l app=nvidia-operator-validator
+
+    if [ "${SANDBOX_VALIDATOR_DEPLOYED}" != "" ]; then
+        echo "Waiting for sandbox-validator to shutdown"
+        kubectl wait --for=delete pod \
+            --timeout=5m \
+            --field-selector "spec.nodeName=${NODE_NAME}" \
+            -n ${OPERATOR_NAMESPACE} \
+            -l app=nvidia-sandbox-validator
+    fi
+
+    if [ "${SANDBOX_PLUGIN_DEPLOYED}" != "" ]; then
+        echo "Waiting for sandbox-device-plugin to shutdown"
+        kubectl wait --for=delete pod \
+            --timeout=5m \
+            --field-selector "spec.nodeName=${NODE_NAME}" \
+            -n ${OPERATOR_NAMESPACE} \
+            -l app=nvidia-sandbox-device-plugin-daemonset
+    fi
+
+    if [ "${VGPU_DEVICE_MANAGER_DEPLOYED}" != "" ]; then
+        echo "Waiting for vgpu-device-manager to shutdown"
+        kubectl wait --for=delete pod \
+            --timeout=5m \
+            --field-selector "spec.nodeName=${NODE_NAME}" \
+            -n ${OPERATOR_NAMESPACE} \
+            -l app=nvidia-vgpu-device-manager
+    fi
+
+    return 0
+}
+
+_evict_all_gpu_operator_components() {
     echo "Shutting down all GPU clients on the current node by disabling their component-specific nodeSelector labels"
     kubectl label --overwrite \
         node ${NODE_NAME} \
@@ -164,7 +243,10 @@ _evict_gpu_operator_components() {
         nvidia.com/gpu.deploy.gpu-feature-discovery=$(_maybe_set_paused ${GFD_DEPLOYED}) \
         nvidia.com/gpu.deploy.dcgm-exporter=$(_maybe_set_paused ${DCGM_EXPORTER_DEPLOYED}) \
         nvidia.com/gpu.deploy.dcgm=$(_maybe_set_paused ${DCGM_DEPLOYED}) \
-        nvidia.com/gpu.deploy.nvsm=$(_maybe_set_paused ${NVSM_DEPLOYED})
+        nvidia.com/gpu.deploy.nvsm=$(_maybe_set_paused ${NVSM_DEPLOYED}) \
+        nvidia.com/gpu.deploy.sandbox-device-plugin=$(_maybe_set_paused ${SANDBOX_PLUGIN_DEPLOYED}) \
+        nvidia.com/gpu.deploy.sandbox-validator=$(_maybe_set_paused ${SANDBOX_VALIDATOR_DEPLOYED}) \
+        nvidia.com/gpu.deploy.vgpu-device-manager=$(_maybe_set_paused ${VGPU_DEVICE_MANAGER_DEPLOYED})
 
     if [ "$?" != "0" ]; then
         return 1
@@ -230,6 +312,34 @@ _evict_gpu_operator_components() {
             -l app=nvidia-mig-manager
     fi
 
+    if [ "${SANDBOX_VALIDATOR_DEPLOYED}" != "" ]; then
+        echo "Waiting for sandbox-validator to shutdown"
+        kubectl wait --for=delete pod \
+            --timeout=5m \
+            --field-selector "spec.nodeName=${NODE_NAME}" \
+            -n ${OPERATOR_NAMESPACE} \
+            -l app=nvidia-sandbox-validator
+    fi
+
+    if [ "${SANDBOX_PLUGIN_DEPLOYED}" != "" ]; then
+        echo "Waiting for sandbox-device-plugin to shutdown"
+        kubectl wait --for=delete pod \
+            --timeout=5m \
+            --field-selector "spec.nodeName=${NODE_NAME}" \
+            -n ${OPERATOR_NAMESPACE} \
+            -l app=nvidia-sandbox-device-plugin-daemonset
+    fi
+
+    if [ "${VGPU_DEVICE_MANAGER_DEPLOYED}" != "" ]; then
+        echo "Waiting for vgpu-device-manager to shutdown"
+        kubectl wait --for=delete pod \
+            --timeout=5m \
+            --field-selector "spec.nodeName=${NODE_NAME}" \
+            -n ${OPERATOR_NAMESPACE} \
+            -l app=nvidia-vgpu-device-manager
+    fi
+
+
     return 0
 }
 
@@ -252,7 +362,10 @@ _reschedule_gpu_operator_components() {
         nvidia.com/gpu.deploy.gpu-feature-discovery=$(_maybe_set_true ${GFD_DEPLOYED}) \
         nvidia.com/gpu.deploy.dcgm-exporter=$(_maybe_set_true ${DCGM_EXPORTER_DEPLOYED}) \
         nvidia.com/gpu.deploy.dcgm=$(_maybe_set_true ${DCGM_DEPLOYED}) \
-        nvidia.com/gpu.deploy.nvsm=$(_maybe_set_true ${NVSM_DEPLOYED})
+        nvidia.com/gpu.deploy.nvsm=$(_maybe_set_true ${NVSM_DEPLOYED}) \
+        nvidia.com/gpu.deploy.sandbox-validator=$(_maybe_set_true ${SANDBOX_VALIDATOR_DEPLOYED}) \
+        nvidia.com/gpu.deploy.sandbox-device-plugin=$(_maybe_set_true ${SANDBOX_PLUGIN_DEPLOYED}) \
+        nvidia.com/gpu.deploy.vgpu-device-manager=$(_maybe_set_true ${VGPU_DEVICE_MANAGER_DEPLOYED})
 
     if [ "$?" != "0" ]; then
         return 1
@@ -333,10 +446,13 @@ uninstall_driver() {
     # fetch current status of all component labels
     _fetch_current_labels
 
+    # always evict a subset of gpu operator components (like the validator) across driver restarts
+    _evict_required_gpu_operator_components || _exit_failed
+
     # check if driver is already loaded
     if _driver_busy; then
         # check if we can cleanup driver modules by just shutting down gpu-operator pods
-        _evict_gpu_operator_components || _exit_failed
+        _evict_all_gpu_operator_components || _exit_failed
         _cleanup_driver
         if [ "$?" != "0" ]; then
             if _is_auto_drain_enabled; then
@@ -350,6 +466,16 @@ uninstall_driver() {
             fi
         fi
         echo "Successfully uninstalled nvidia driver components"
+    fi
+
+    # If vfio-pci driver is in use, ensure we unbind it from all devices.
+    # If vfio-pci driver is not in use and we have reached this point, all
+    # devices will not be bound to any driver, so the below unbind operation
+    # will be a no-op.
+    vfio-manage unbind --all
+    if [ "$?" != "0" ]; then
+        echo "Unable to unbind vfio-pci driver from all devices"
+        _exit_failed
     fi
 
     if _is_auto_drain_enabled; then
@@ -385,6 +511,7 @@ _unload_driver() {
     local nvidia_uvm_refs=0
     local nvidia_modeset_refs=0
     local nvidia_peermem_refs=0
+    local nvidia_vgpu_vfio_refs=0
 
     echo "Unloading NVIDIA driver kernel modules..."
     if [ -f /sys/module/nvidia_modeset/refcnt ]; then
@@ -402,11 +529,25 @@ _unload_driver() {
         rmmod_args+=("nvidia-peermem")
         ((++nvidia_deps))
     fi
+    if [ -f /sys/module/nvidia_vgpu_vfio/refcnt ]; then
+        nvidia_vgpu_vfio_refs=$(< /sys/module/nvidia_vgpu_vfio/refcnt)
+        rmmod_args+=("nvidia_vgpu_vfio")
+        ((++nvidia_deps))
+    fi
     if [ -f /sys/module/nvidia/refcnt ]; then
         nvidia_refs=$(< /sys/module/nvidia/refcnt)
         rmmod_args+=("nvidia")
     fi
-    if [ ${nvidia_refs} -gt ${nvidia_deps} ] || [ ${nvidia_uvm_refs} -gt 0 ] || [ ${nvidia_modeset_refs} -gt 0 ] || [ ${nvidia_peermem_refs} -gt 0 ]; then
+
+    if [ ${nvidia_refs} -gt ${nvidia_deps} ] && [ ${nvidia_refs} -eq 2 ] && [[ " ${rmmod_args} " =~ " nvidia_vgpu_vfio " ]]; then
+        # When cleaning up a previous vGPU Manager install, it is possible $nvidia_refs > $nvidia_deps
+        # since nvidia_vgpu_vfio holds 2 handles on the driver. Catch this case and proceed to unload driver modules.
+        #     $ lsmod | grep nvidia
+        #     nvidia_vgpu_vfio       53248  0
+        #     nvidia              35315712  2
+        #     mdev                   24576  2 vfio_mdev,nvidia_vgpu_vfio
+        :
+    elif [ ${nvidia_refs} -gt ${nvidia_deps} ] || [ ${nvidia_uvm_refs} -gt 0 ] || [ ${nvidia_modeset_refs} -gt 0 ] || [ ${nvidia_peermem_refs} -gt 0 ] || [ ${nvidia_vgpu_vfio_refs} -gt 0 ]; then
         # run lsmod to debug module usage
         lsmod | grep nvidia
         echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
