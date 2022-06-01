@@ -302,14 +302,18 @@ _unload_nouveau() {
 
 _exit_failed() {
     # below commands are no-op if node is already in desired state
-    _uncordon_k8s_node
+    if _is_auto_drain_enabled; then
+        _uncordon_k8s_node
+    fi
     _reschedule_gpu_operator_components
     exit 1
 }
 
 _exit_success() {
     # below commands are no-op if node is already in desired state
-    _uncordon_k8s_node
+    if _is_auto_drain_enabled; then
+        _uncordon_k8s_node
+    fi
     _reschedule_gpu_operator_components
     exit 0
 }
