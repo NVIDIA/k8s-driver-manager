@@ -441,10 +441,13 @@ _host_driver() {
 uninstall_driver() {
     # don't attempt to un-install if driver is pre-installed on the node
     if _host_driver; then
-        echo "NVIDIA GPU driver is already pre-installed on the node, will not proceed with the containerized driver installation. This pod can be disabled through 'nvidia.com/gpu.deploy.driver=false' node label."
-        trap "echo 'Caught signal'; exit 0;" HUP INT QUIT PIPE TERM
-        # keep pod in init state
-        sleep inf
+        echo "NVIDIA GPU driver is already pre-installed on the node, disabling the containerized driver on the node"
+        kubectl label --overwrite \
+          node ${NODE_NAME} \
+          nvidia.com/gpu.deploy.driver=pre-installed
+        # add wait here as pod termination can take 30s due to default grace-period
+        sleep 60
+        exit 1
     fi
 
     # fetch current status of all component labels
