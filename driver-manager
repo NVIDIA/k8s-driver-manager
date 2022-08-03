@@ -432,9 +432,14 @@ _exit_success() {
 }
 
 _host_driver() {
-    if [ -f /host/usr/bin/nvidia-smi ]; then
-        return 0
+    # check if driver is pre-installed on the host
+    if [ -f /host/usr/bin/nvidia-smi ] || [ -L /host/usr/bin/nvidia-smi ]; then
+        chroot /host nvidia-smi
+        if [ "$?" == "0" ]; then
+            return 0
+        fi
     fi
+
     return 1
 }
 
