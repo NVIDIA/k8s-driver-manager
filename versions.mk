@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-VERSION ?= v0.4.1
+VERSION ?= v0.4.2
 
 vVERSION := v$(VERSION:v%=%)
 
-CUDA_VERSION := 11.6.0
+CUDA_VERSION := 11.7.1
