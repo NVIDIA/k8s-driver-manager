@@ -488,13 +488,11 @@ uninstall_driver() {
     # fetch current status of all component labels
     _fetch_current_labels
 
-    # always evict a subset of gpu operator components (like the validator) across driver restarts
-    _evict_required_gpu_operator_components || _exit_failed
+    # always evict all gpu-operator components across a driver restart
+    _evict_all_gpu_operator_components || _exit_failed
 
     # check if driver is already loaded
     if _driver_busy; then
-        # check if we can cleanup driver modules by just shutting down gpu-operator pods
-        _evict_all_gpu_operator_components || _exit_failed
         _cleanup_driver
         if [ "$?" != "0" ]; then
             if _is_auto_drain_enabled; then
