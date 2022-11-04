@@ -19,6 +19,8 @@ DRAIN_POD_SELECTOR_LABEL=${DRAIN_POD_SELECTOR_LABEL:-""}
 DRAIN_TIMEOUT_SECONDS=${DRAIN_TIMEOUT_SECONDS:-"0s"}
 DRAIN_DELETE_EMPTYDIR_DATA=${DRAIN_DELETE_EMPTYDIR_DATA:-"false"}
 ENABLE_AUTO_DRAIN=${ENABLE_AUTO_DRAIN:-"true"}
+ENABLE_GPU_POD_EVICTION=${ENABLE_GPU_POD_EVICTION:-"true"}
+NVDRAIN_DEBUG=${NVDRAIN_DEBUG:-"false"}
 DRIVER_ROOT=/run/nvidia/driver
 DRIVER_PID_FILE=/run/nvidia/nvidia-driver.pid
 OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-"gpu-operator-resources"}
@@ -45,11 +47,28 @@ _drain_k8s_node() {
     return 0
 }
 
+_nvdrain_k8s_node() {
+    echo "Draining node ${NODE_NAME} of any GPU pods..."
+    nvdrain --debug=${NVDRAIN_DEBUG} --node-name=${NODE_NAME} --kubeconfig=${KUBECONFIG} --force=${DRAIN_USE_FORCE} --delete-emptydir-data=${DRAIN_DELETE_EMPTYDIR_DATA} --timeout=${DRAIN_TIMEOUT_SECONDS}
+    if [ "$?" != "0" ]; then
+        return 1
+    fi
+    return 0
+}
+
 _is_auto_drain_enabled() {
     if [ "${ENABLE_AUTO_DRAIN}" = "true" ]; then
         return 0
     fi
     echo "Auto drain of the node ${NODE_NAME} is disabled"
+    return 1
+}
+
+_is_gpu_pod_eviction_enabled() {
+    if [ "${ENABLE_GPU_POD_EVICTION}" = "true" ]; then
+        return 0
+    fi
+    echo "Auto eviction of GPU pods on node ${NODE_NAME} is disabled"
     return 1
 }
 
@@ -363,6 +382,15 @@ _evict_all_gpu_operator_components() {
     return 0
 }
 
+_cordon_k8s_node() {
+    echo "Cordoning node ${NODE_NAME}..."
+    kubectl cordon ${NODE_NAME}
+    if [ "$?" != "0" ]; then
+        return 1
+    fi
+    return 0
+}
+
 _uncordon_k8s_node() {
     echo "Uncordoning node ${NODE_NAME}..."
     kubectl uncordon ${NODE_NAME}
@@ -412,13 +440,8 @@ _reschedule_gpu_operator_components() {
     return 0
 }
 
-_driver_busy() {
-    local nvidia_refs=0
+_driver_loaded() {
     if [ -f /sys/module/nvidia/refcnt ]; then
-        nvidia_refs=$(< /sys/module/nvidia/refcnt)
-    fi
-    if [ ${nvidia_refs} -gt 0 ]; then
-        echo "nvidia driver module is already loaded with refcount ${nvidia_refs}"
         return 0
     fi
     return 1
@@ -445,7 +468,7 @@ _unload_nouveau() {
 
 _exit_failed() {
     # below commands are no-op if node is already in desired state
-    if _is_auto_drain_enabled; then
+    if _is_gpu_pod_eviction_enabled || _is_auto_drain_enabled; then
         _uncordon_k8s_node
     fi
     _reschedule_gpu_operator_components
@@ -454,7 +477,7 @@ _exit_failed() {
 
 _exit_success() {
     # below commands are no-op if node is already in desired state
-    if _is_auto_drain_enabled; then
+    if _is_gpu_pod_eviction_enabled || _is_auto_drain_enabled; then
         _uncordon_k8s_node
     fi
     _reschedule_gpu_operator_components
@@ -491,8 +514,19 @@ uninstall_driver() {
     # always evict all gpu-operator components across a driver restart
     _evict_all_gpu_operator_components || _exit_failed
 
+    # delete any GPU pods running on the node
+    if _is_gpu_pod_eviction_enabled; then
+        _cordon_k8s_node
+        _nvdrain_k8s_node
+        if [ "$?" != "0" ]; then
+            echo "Failed to drain node of GPU pods"
+            _exit_failed
+        fi
+    fi
+
+
     # check if driver is already loaded
-    if _driver_busy; then
+    if _driver_loaded; then
         _cleanup_driver
         if [ "$?" != "0" ]; then
             if _is_auto_drain_enabled; then
@@ -518,7 +552,7 @@ uninstall_driver() {
         _exit_failed
     fi
 
-    if _is_auto_drain_enabled; then
+    if _is_gpu_pod_eviction_enabled || _is_auto_drain_enabled; then
         # uncordon the node in case if the pod has restarted abruptly after we cordoned the node
         _uncordon_k8s_node
     fi
