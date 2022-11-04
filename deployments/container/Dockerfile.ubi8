@@ -14,6 +14,19 @@
 
 ARG CUDA_VERSION
 ARG BASE_DIST
+ARG GOLANG_VERSION=1.17
+
+FROM golang:${GOLANG_VERSION} AS build
+
+WORKDIR /work
+
+COPY go.mod go.mod
+COPY go.sum go.sum
+COPY vendor vendor
+COPY cmd/nvdrain cmd/nvdrain
+
+RUN GOOS=linux go build -o nvdrain ./cmd/nvdrain
+
 FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
 
 ARG TARGETARCH
@@ -26,6 +39,7 @@ RUN chmod a+x /usr/bin/kubectl
 
 COPY driver-manager /usr/local/bin
 COPY scripts/vfio-manage /usr/local/bin
+COPY --from=build /work/nvdrain /usr/local/bin
 
 LABEL io.k8s.display-name="NVIDIA Driver Upgrade Manager for Kubernetes"
 LABEL name="NVIDIA Driver Upgrade Manager for Kubernetes"
