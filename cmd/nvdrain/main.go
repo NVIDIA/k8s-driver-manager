@@ -37,6 +37,8 @@ var (
 
 	nvidiaResourceNamePrefix = "nvidia.com/gpu"
 	nvidiaMigResourcePrefix  = "nvidia.com/mig-"
+
+	gpuPods = map[string]corev1.Pod{}
 )
 
 // flags for the 'nvdrain' command
@@ -193,7 +195,8 @@ func nvdrainWrapper(c *cli.Context, f *flags) error {
 		log.Debugf("Warnings: %s", warnings)
 	}
 
-	if errs != nil {
+	// Only catch errors related to GPU pods
+	if errs != nil && (len(podDeleteList.Pods()) != len(gpuPods)) {
 		log.Infof("ERROR: following errors met when getting pods for deletion")
 		for _, err = range errs {
 			log.Infof("  %v", err)
@@ -230,10 +233,9 @@ func gpuPodSpecFilter(pod corev1.Pod) drain.PodDeleteStatus {
 	}
 
 	for _, c := range pod.Spec.Containers {
-		if gpuInResourceList(c.Resources.Limits) {
-			return drain.MakePodDeleteStatusOkay()
-		}
-		if gpuInResourceList(c.Resources.Requests) {
+		if gpuInResourceList(c.Resources.Limits) || gpuInResourceList(c.Resources.Requests) {
+			key := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+			gpuPods[key] = pod
 			return drain.MakePodDeleteStatusOkay()
 		}
 	}
