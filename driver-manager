@@ -86,7 +86,7 @@ _maybe_set_paused() {
     elif [  "${current_value}" = "true" ]; then
         # disable
         echo "${PAUSED_STR}"
-    elif [ "${current_value}" == *"${PAUSED_STR}"* ]; then
+    elif [[ "${current_value}" == *"${PAUSED_STR}"* ]]; then
         # already added paused status for driver upgrade
         echo "${current_value}"
     else
@@ -100,10 +100,10 @@ _maybe_set_paused() {
 # we want to honor it's existing value and not change it.
 _maybe_set_true() {
     local current_value="${1}"
-    if [  "${current_value}" = "false" ]; then
+    if [ "${current_value}" = "false" ]; then
         # disabled by user
         echo "false"
-    elif [  "${current_value}" = "${PAUSED_STR}" ]; then
+    elif [ "${current_value}" = "${PAUSED_STR}" ]; then
         # enable the component
         echo "true"
     else
@@ -420,7 +420,7 @@ _reschedule_gpu_operator_components() {
     fi
 
     # check for nodeType=gpu label used by NVIDIA Fleet Command
-    if [ "${NODE_TYPE_LABEL}" == *"${PAUSED_STR}"*  ]; then
+    if [ "${NODE_TYPE_LABEL}" != "" ]; then
         echo "Restarting GPU clients on NVIDIA Fleet Command"
         kubectl label --overwrite node ${NODE_NAME} \
             nodeType=$(_maybe_set_true ${NODE_TYPE_LABEL})
