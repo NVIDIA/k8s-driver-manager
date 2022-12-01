@@ -519,8 +519,18 @@ uninstall_driver() {
         _cordon_k8s_node
         _nvdrain_k8s_node
         if [ "$?" != "0" ]; then
+            # nvdrain will only return non-zero code when GPU pods
+            # are running on the node and cannot be deleted. Attempt
+            # to drain the node in this case.
             echo "Failed to drain node of GPU pods"
-            _exit_failed
+            if ! _is_auto_drain_enabled; then
+                echo "Cannot proceed until all GPU pods are drained from the node. Exiting."
+                _exit_failed
+            fi
+            echo "Attempting node drain"
+            trap '_exit_failed' ERR
+            _drain_k8s_node
+            _cleanup_driver
         fi
     fi
 
