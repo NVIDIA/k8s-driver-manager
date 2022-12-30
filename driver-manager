@@ -37,6 +37,7 @@ SANDBOX_VALIDATOR_DEPLOYED=""
 SANDBOX_PLUGIN_DEPLOYED=""
 VGPU_DEVICE_MANAGER_DEPLOYED=""
 NODE_TYPE_LABEL=""
+AUTO_UPGRADE_POLICY_ENABLED=""
 
 _drain_k8s_node() {
     echo "Draining node ${NODE_NAME}..."
@@ -57,6 +58,11 @@ _nvdrain_k8s_node() {
 }
 
 _is_auto_drain_enabled() {
+    if _is_driver_auto_upgrade_policy_enabled; then
+        echo "Auto drain of the node ${NODE_NAME} is disabled by the upgrade policy"
+        return 1
+    fi
+    # check env
     if [ "${ENABLE_AUTO_DRAIN}" = "true" ]; then
         return 0
     fi
@@ -65,10 +71,23 @@ _is_auto_drain_enabled() {
 }
 
 _is_gpu_pod_eviction_enabled() {
+    if _is_driver_auto_upgrade_policy_enabled; then
+        echo "Auto eviction of GPU pods on node ${NODE_NAME} is disabled by the upgrade policy"
+        return 1
+    fi
+    # check env
     if [ "${ENABLE_GPU_POD_EVICTION}" = "true" ]; then
         return 0
     fi
     echo "Auto eviction of GPU pods on node ${NODE_NAME} is disabled"
+    return 1
+}
+
+_is_driver_auto_upgrade_policy_enabled() {
+    if [ "${AUTO_UPGRADE_POLICY_ENABLED}" = "true" ]; then
+        return 0
+    fi
+    echo "Auto upgrade policy of the GPU driver on the node ${NODE_NAME} is disabled"
     return 1
 }
 
@@ -110,6 +129,15 @@ _maybe_set_true() {
         # revert back to original label
         echo "${current_value}" | sed -r "s/${PAUSED_STR}//g" | tr -d "_"
     fi
+}
+
+_fetch_auto_upgrade_annotation() {
+    AUTO_UPGRADE_POLICY_ENABLED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.annotations.nvidia\.com/gpu-driver-upgrade-enabled}')
+    if [ "${?}" != "0" ]; then
+        echo "Unable to get the value of the 'nvidia.com/gpu-driver-upgrade-enabled' annotation"
+        exit 1
+    fi
+    echo "Current value of AUTO_UPGRADE_POLICY_ENABLED=${AUTO_UPGRADE_POLICY_ENABLED}'"
 }
 
 _fetch_current_labels() {
@@ -510,6 +538,9 @@ uninstall_driver() {
 
     # fetch current status of all component labels
     _fetch_current_labels
+
+    # fetch auto upgrade policy annotation
+    _fetch_auto_upgrade_annotation
 
     # always evict all gpu-operator components across a driver restart
     _evict_all_gpu_operator_components || _exit_failed
