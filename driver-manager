@@ -515,8 +515,8 @@ _exit_success() {
 _host_driver() {
     # check if driver is pre-installed on the host
     if [ -f /host/usr/bin/nvidia-smi ] || [ -L /host/usr/bin/nvidia-smi ]; then
-        chroot /host nvidia-smi
-        if [ "$?" == "0" ]; then
+        DRIVER_VERSION=$(chroot /host nvidia-smi --query-gpu=driver_version --format=csv,noheader)
+        if [ $? == 0 ] && [ ! -z "${DRIVER_VERSION}" ]; then
             return 0
         fi
     fi
