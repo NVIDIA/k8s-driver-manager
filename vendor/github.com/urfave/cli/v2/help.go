@@ -42,6 +42,7 @@ var helpCommand = &Command{
 		// 3 $ app foo
 		// 4 $ app help foo
 		// 5 $ app foo help
+		// 6 $ app foo -h (with no other sub-commands nor flags defined)
 
 		// Case 4. when executing a help command set the context to parent
 		// to allow resolution of subsequent args. This will transform
@@ -77,6 +78,8 @@ var helpCommand = &Command{
 			HelpPrinter(cCtx.App.Writer, templ, cCtx.Command)
 			return nil
 		}
+
+		// Case 6, handling incorporated in the callee itself
 		return ShowSubcommandHelp(cCtx)
 	},
 }
@@ -227,7 +230,7 @@ func DefaultCompleteWithFlags(cmd *Command) func(cCtx *Context) {
 			return
 		}
 
-		printCommandSuggestions(cCtx.App.Commands, cCtx.App.Writer)
+		printCommandSuggestions(cCtx.Command.Subcommands, cCtx.App.Writer)
 	}
 }
 
@@ -246,7 +249,7 @@ func ShowCommandHelp(ctx *Context, command string) error {
 	}
 	for _, c := range commands {
 		if c.HasName(command) {
-			if !ctx.App.HideHelpCommand && !c.HasName(helpName) && len(c.Subcommands) != 0 {
+			if !ctx.App.HideHelpCommand && !c.HasName(helpName) && len(c.Subcommands) != 0 && c.Command(helpName) == nil {
 				c.Subcommands = append(c.Subcommands, helpCommandDontUse)
 			}
 			if !ctx.App.HideHelp && HelpFlag != nil {
@@ -292,8 +295,12 @@ func ShowSubcommandHelp(cCtx *Context) error {
 	if cCtx == nil {
 		return nil
 	}
-
-	HelpPrinter(cCtx.App.Writer, SubcommandHelpTemplate, cCtx.Command)
+	// use custom template when provided (fixes #1703)
+	templ := SubcommandHelpTemplate
+	if cCtx.Command != nil && cCtx.Command.CustomHelpTemplate != "" {
+		templ = cCtx.Command.CustomHelpTemplate
+	}
+	HelpPrinter(cCtx.App.Writer, templ, cCtx.Command)
 	return nil
 }
 
@@ -308,15 +315,15 @@ func printVersion(cCtx *Context) {
 
 // ShowCompletions prints the lists of commands within a given context
 func ShowCompletions(cCtx *Context) {
-	a := cCtx.App
-	if a != nil && a.BashComplete != nil {
-		a.BashComplete(cCtx)
+	c := cCtx.Command
+	if c != nil && c.BashComplete != nil {
+		c.BashComplete(cCtx)
 	}
 }
 
 // ShowCommandCompletions prints the custom completions for a given command
 func ShowCommandCompletions(ctx *Context, command string) {
-	c := ctx.App.Command(command)
+	c := ctx.Command.Command(command)
 	if c != nil {
 		if c.BashComplete != nil {
 			c.BashComplete(ctx)
@@ -453,22 +460,13 @@ func checkCompletions(cCtx *Context) bool {
 
 	if args := cCtx.Args(); args.Present() {
 		name := args.First()
-		if cmd := cCtx.App.Command(name); cmd != nil {
+		if cmd := cCtx.Command.Command(name); cmd != nil {
 			// let the command handle the completion
 			return false
 		}
 	}
 
 	ShowCompletions(cCtx)
-	return true
-}
-
-func checkCommandCompletions(c *Context, name string) bool {
-	if !c.shellComplete {
-		return false
-	}
-
-	ShowCommandCompletions(c, name)
 	return true
 }
 
