@@ -627,6 +627,7 @@ _unload_driver() {
     local nvidia_modeset_refs=0
     local nvidia_peermem_refs=0
     local nvidia_vgpu_vfio_refs=0
+    local nvidia_fs_refs=0
 
     echo "Unloading NVIDIA driver kernel modules..."
     if [ -f /sys/module/nvidia_modeset/refcnt ]; then
