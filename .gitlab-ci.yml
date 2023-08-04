@@ -30,6 +30,19 @@ include:
   script:
     - make -f deployments/container/Makefile build-${DIST}
 
+.go-check:
+  image:
+    name: golang:1.20.7-alpine3.18
+  before_script:
+    - apk add --no-cache bash make git
+  stage: go-checks
+
+go-validate-modules:
+  extends:
+    - .go-check
+  script:
+    - make validate-modules
+
 image-ubi8:
   extends:
     - .image-build

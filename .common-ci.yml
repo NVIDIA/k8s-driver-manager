@@ -22,6 +22,7 @@ variables:
   BUILD_MULTI_ARCH_IMAGES: "true"
 
 stages:
+  - go-checks
   - image-build
   - test
   - scan
