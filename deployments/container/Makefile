@@ -98,3 +98,14 @@ bump-commit:
 	@git commit -m "$(BUMP_COMMIT)"
 	@echo "Applied the diff:"
 	@git --no-pager diff HEAD~1
+
+.PHONY: validate-modules
+validate-modules:
+	@echo "- Verifying that the dependencies have expected content..."
+	$(GO_CMD) mod verify
+	@echo "- Checking for any unused/missing packages in go.mod..."
+	$(GO_CMD) mod tidy
+	@git diff --exit-code -- go.sum go.mod
+	@echo "- Checking if the vendor dir is in sync..."
+	$(GO_CMD) mod vendor
+	@git diff --exit-code -- vendor
