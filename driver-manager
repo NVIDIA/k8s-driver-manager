@@ -687,8 +687,8 @@ _unload_driver() {
 # Unmount the driver rootfs from the run directory.
 _unmount_rootfs() {
     echo "Unmounting NVIDIA driver rootfs..."
-    if findmnt -r -o TARGET | grep "/run/nvidia/driver" > /dev/null; then
-        umount -l -R /run/nvidia/driver
+    if findmnt -r -o TARGET | grep "${DRIVER_ROOT}" > /dev/null; then
+        umount -l -R ${DRIVER_ROOT}
         return 0
     fi
     return 1
