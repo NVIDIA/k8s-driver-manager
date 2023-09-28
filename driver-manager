@@ -36,7 +36,8 @@ MIG_MANAGER_DEPLOYED=""
 SANDBOX_VALIDATOR_DEPLOYED=""
 SANDBOX_PLUGIN_DEPLOYED=""
 VGPU_DEVICE_MANAGER_DEPLOYED=""
-NODE_TYPE_LABEL=""
+NODE_LABEL_FOR_GPU_POD_EVICTION=$(echo ${NODE_LABEL_FOR_GPU_POD_EVICTION} | sed -e "s/=.*$//g")
+CUSTOM_OPERAND_NODE_LABEL_VALUE=""
 AUTO_UPGRADE_POLICY_ENABLED=""
 
 _drain_k8s_node() {
@@ -229,14 +230,17 @@ _fetch_current_labels() {
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.vgpu-device-manager=${VGPU_DEVICE_MANAGER_DEPLOYED}'"
 
-    echo "Getting current value of the 'nodeType' node label(used by NVIDIA Fleet Command)"
-    NODE_TYPE_LABEL=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nodeType}')
-    if [ "${?}" != "0" ]; then
-        echo "Unable to get the value of the 'nodeType' label"
-        exit 1
+    if [ "${NODE_LABEL_FOR_GPU_POD_EVICTION}" != "" ]; then
+        echo "Getting current value of the '${NODE_LABEL_FOR_GPU_POD_EVICTION}' node label used by custom operands"
+        LABEL_KEY=$(echo $NODE_LABEL_FOR_GPU_POD_EVICTION | sed -e "s/\./\\\./g")
+        JSON_LABEL_PATH="{$.metadata.labels.$LABEL_KEY}"
+        CUSTOM_OPERAND_NODE_LABEL_VALUE=$(kubectl get nodes ${NODE_NAME} -o=jsonpath=${JSON_LABEL_PATH})
+        if [ "${?}" != "0" ]; then
+            echo "Unable to get the value of the '${NODE_LABEL_FOR_GPU_POD_EVICTION}' label"
+            exit 1
+        fi
+        echo "Current value of '${NODE_LABEL_FOR_GPU_POD_EVICTION}=${CUSTOM_OPERAND_NODE_LABEL_VALUE}'"
     fi
-    echo "Current value of 'nodeType=${NODE_TYPE_LABEL}'"
-
 }
 
 _evict_required_gpu_operator_components() {
@@ -308,11 +312,11 @@ _evict_all_gpu_operator_components() {
         return 1
     fi
 
-    # check for nodeType=gpu label used by NVIDIA Fleet Command
-    if [ "${NODE_TYPE_LABEL}" == "gpu" ]; then
-        echo "Shutting down GPU clients on NVIDIA Fleet Command"
+    # check if a custom operand node selector label is provided for eviction
+    if [ "${CUSTOM_OPERAND_NODE_LABEL_VALUE}" != "" ]; then
+        echo "Shutting down GPU clients using node selector label ${NODE_LABEL_FOR_GPU_POD_EVICTION}=${CUSTOM_OPERAND_NODE_LABEL_VALUE}"
         kubectl label --overwrite node ${NODE_NAME} \
-            nodeType=$(_maybe_set_paused ${NODE_TYPE_LABEL})
+            ${NODE_LABEL_FOR_GPU_POD_EVICTION}=$(_maybe_set_paused ${CUSTOM_OPERAND_NODE_LABEL_VALUE})
 
         if [ "$?" != "0" ]; then
             return 1
@@ -447,11 +451,11 @@ _reschedule_gpu_operator_components() {
         return 1
     fi
 
-    # check for nodeType=gpu label used by NVIDIA Fleet Command
-    if [ "${NODE_TYPE_LABEL}" != "" ]; then
-        echo "Restarting GPU clients on NVIDIA Fleet Command"
+    # check for custom operand node selector label
+    if [ "${CUSTOM_OPERAND_NODE_LABEL_VALUE}" != "" ]; then
+        echo "Restarting GPU clients using node selector label ${NODE_LABEL_FOR_GPU_POD_EVICTION}=${CUSTOM_OPERAND_NODE_LABEL_VALUE}"
         kubectl label --overwrite node ${NODE_NAME} \
-            nodeType=$(_maybe_set_true ${NODE_TYPE_LABEL})
+            ${NODE_LABEL_FOR_GPU_POD_EVICTION}=$(_maybe_set_true ${CUSTOM_OPERAND_NODE_LABEL_VALUE})
         if [ "$?" != "0" ]; then
             return 1
         fi
