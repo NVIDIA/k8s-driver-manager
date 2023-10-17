@@ -31,7 +31,7 @@ stages:
 .dist-ubi8:
   variables:
     DIST: ubi8
-    CVE_UPDATES: "cyrus-sasl-lib"
+    CVE_UPDATES: "cyrus-sasl-lib glibc"
 
 # Define the platform targets
 .platform-amd64:
