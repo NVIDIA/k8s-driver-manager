@@ -680,6 +680,7 @@ _unload_driver() {
     local nvidia_peermem_refs=0
     local nvidia_vgpu_vfio_refs=0
     local nvidia_fs_refs=0
+    local gdrdrv_refs=0
 
     echo "Unloading NVIDIA driver kernel modules..."
     if [ -f /sys/module/nvidia_modeset/refcnt ]; then
@@ -707,6 +708,11 @@ _unload_driver() {
         rmmod_args+=("nvidia_vgpu_vfio")
         ((++nvidia_deps))
     fi
+    if [ -f /sys/module/gdrdrv/refcnt ]; then
+            gdrdrv_refs=$(< /sys/module/gdrdrv/refcnt)
+            rmmod_args+=("gdrdrv")
+            ((++nvidia_deps))
+    fi
     if [ -f /sys/module/nvidia/refcnt ]; then
         nvidia_refs=$(< /sys/module/nvidia/refcnt)
         rmmod_args+=("nvidia")
@@ -720,7 +726,7 @@ _unload_driver() {
         #     nvidia              35315712  2
         #     mdev                   24576  2 vfio_mdev,nvidia_vgpu_vfio
         :
-    elif [ ${nvidia_refs} -gt ${nvidia_deps} ] || [ ${nvidia_uvm_refs} -gt 0 ] || [ ${nvidia_modeset_refs} -gt 0 ] || [ ${nvidia_peermem_refs} -gt 0 ] || [ ${nvidia_vgpu_vfio_refs} -gt 0 ] || [ ${nvidia_fs_refs} -gt 0 ]; then
+    elif [ ${nvidia_refs} -gt ${nvidia_deps} ] || [ ${nvidia_uvm_refs} -gt 0 ] || [ ${nvidia_modeset_refs} -gt 0 ] || [ ${nvidia_peermem_refs} -gt 0 ] || [ ${nvidia_vgpu_vfio_refs} -gt 0 ] || [ ${nvidia_fs_refs} -gt 0 ] || [ ${gdrdrv_refs} -gt 0 ]; then
         # run lsmod to debug module usage
         lsmod | grep nvidia
         echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
