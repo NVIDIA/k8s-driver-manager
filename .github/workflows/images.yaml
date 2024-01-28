@@ -30,10 +30,6 @@ on:
 
 jobs:
   build-image:
-    # We trigger image builds on push events (MERGED pull requests) or on non-closed PRs that are not created against a fork.
-    if: |
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'push')
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -61,9 +57,10 @@ jobs:
           echo "PUSH_ON_BUILD=${GENERATE_ARTIFACTS}" >> $GITHUB_ENV
           echo "BUILD_MULTI_ARCH_IMAGES=${GENERATE_ARTIFACTS}" >> $GITHUB_ENV
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
