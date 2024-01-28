@@ -1,4 +1,4 @@
-module gitlab.com/nvidia/cloud-native/k8s-driver-manager
+module github.com/NVIDIA/k8s-driver-manager
 
 go 1.20
 
