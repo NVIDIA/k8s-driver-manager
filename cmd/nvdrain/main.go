@@ -119,7 +119,7 @@ func main() {
 	c.Before = func(c *cli.Context) error {
 		err := validateFlags(&flags)
 		if err != nil {
-			cli.ShowAppHelp(c)
+			_ = cli.ShowAppHelp(c)
 			return err
 		}
 
