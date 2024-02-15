@@ -571,12 +571,6 @@ _wait_for_mofed_driver() {
 }
 
 uninstall_driver() {
-    # when GPUDirectRDMA is enabled, wait until MOFED driver has finished installing
-    if _gpu_direct_rdma_enabled; then
-        echo "GPUDirectRDMA is enabled, validating MOFED driver installation"
-        _wait_for_mofed_driver
-    fi
-
     # don't attempt to un-install if driver is pre-installed on the node
     if _host_driver; then
         echo "NVIDIA GPU driver is already pre-installed on the node, disabling the containerized driver on the node"
@@ -643,6 +637,12 @@ uninstall_driver() {
     if [ "$?" != "0" ]; then
         echo "Unable to unbind vfio-pci driver from all devices"
         _exit_failed
+    fi
+
+    # when GPUDirectRDMA is enabled, wait until MOFED driver has finished installing
+    if _gpu_direct_rdma_enabled; then
+        echo "GPUDirectRDMA is enabled, validating MOFED driver installation"
+        _wait_for_mofed_driver
     fi
 
     if _is_gpu_pod_eviction_enabled || _is_auto_drain_enabled; then
