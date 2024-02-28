@@ -14,6 +14,7 @@
 
 DOCKER   ?= docker
 MKDIR    ?= mkdir
+GO       ?= go
 
 include $(CURDIR)/versions.mk
 
@@ -78,3 +79,14 @@ PHONY: .shell
 		-w /work \
 		--user $$(id -u):$$(id -g) \
 		$(BUILDIMAGE)
+
+.PHONY: validate-modules
+validate-modules:
+	@echo "- Verifying that the dependencies have expected content..."
+	$(GO) mod verify
+	@echo "- Checking for any unused/missing packages in go.mod..."
+	$(GO) mod tidy
+	@git diff --exit-code -- go.sum go.mod
+	@echo "- Checking if the vendor dir is in sync..."
+	$(GO) mod vendor
+	@git diff --exit-code -- vendor
