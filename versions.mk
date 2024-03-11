@@ -17,7 +17,7 @@ MODULE := github.com/NVIDIA/k8s-driver-manager
 
 vVERSION := v$(VERSION:v%=%)
 
-CUDA_VERSION := 12.3.1
+CUDA_VERSION := 12.3.2
 GOLANG_VERSION ?= 1.21.5
 
 BUILDIMAGE_TAG ?= devel-go$(GOLANG_VERSION)
