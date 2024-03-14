@@ -14,9 +14,8 @@
 
 ARG CUDA_VERSION
 ARG BASE_DIST
-ARG GOLANG_VERSION=x.x.x
 
-FROM golang:${GOLANG_VERSION} AS build
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST} AS build
 
 WORKDIR /work
 
@@ -25,9 +24,27 @@ COPY go.sum go.sum
 COPY vendor vendor
 COPY cmd/nvdrain cmd/nvdrain
 
+RUN dnf install -y wget make git gcc
+
+ARG GOLANG_VERSION=0.0.0
+RUN set -eux; \
+    \
+    arch="$(uname -m)"; \
+    case "${arch##*-}" in \
+        x86_64 | amd64) ARCH='amd64' ;; \
+        ppc64el | ppc64le) ARCH='ppc64le' ;; \
+        aarch64 | arm64) ARCH='arm64' ;; \
+        *) echo "unsupported architecture" ; exit 1 ;; \
+    esac; \
+    wget -nv -O - https://storage.googleapis.com/golang/go${GOLANG_VERSION}.linux-${ARCH}.tar.gz \
+    | tar -C /usr/local -xz
+
+ENV GOPATH /go
+ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
+
 RUN GOOS=linux go build -o nvdrain ./cmd/nvdrain
 
-FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
 
 ARG TARGETARCH
 
