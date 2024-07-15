@@ -80,9 +80,7 @@ $(BUILD_TARGETS): build-%:
 			$(DOCKER_BUILD_OPTIONS) \
 			$(DOCKER_BUILD_PLATFORM_OPTIONS) \
 			--tag $(IMAGE) \
-			--build-arg BASE_DIST="$(DIST)" \
 			--build-arg GOLANG_VERSION="$(GOLANG_VERSION)" \
-			--build-arg CUDA_VERSION="$(CUDA_VERSION)" \
 			--build-arg VERSION="$(VERSION)" \
 			--build-arg CVE_UPDATES="$(CVE_UPDATES)" \
 			--file $(DOCKERFILE) \
