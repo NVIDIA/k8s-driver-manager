@@ -26,6 +26,7 @@ stages:
   - test
   - scan
   - release
+  - sign
 
 # Define the distribution targets
 .dist-ubi8:
