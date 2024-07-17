@@ -184,19 +184,18 @@ release:ngc-ubi8:
     - 'echo Image Tag: ${IMAGE_TAG} && [[ -n "${IMAGE_TAG}" ]] || exit 1'
   script:
     - 'echo "Signing the image ${IMAGE_NAME}:${IMAGE_TAG}"'
-    - ngc-cli/ngc registry image publish --source ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:${IMAGE_TAG} --public --discoverable --allow-guest --sign --org nvidia 
+    - ngc-cli/ngc registry image publish --source ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:${IMAGE_TAG} --public --discoverable --allow-guest --sign --org nvidia
 
 sign:ngc:
   extends:
     - .sign:ngc
   parallel:
     matrix:
-    - SIGN_JOB_NAME: [""]
-      DIST: ["CI_COMMIT_TAG", "ubi8"]
+    - DIST: ["ONLY_CI_COMMIT_TAG", "ubi8"]
   rules:
-    - if: '$DIST == "CI_COMMIT_TAG"'
+    - if: $CI_COMMIT_TAG && '$DIST == "ONLY_CI_COMMIT_TAG"'
       variables:
-        IMAGE_TAG: "${SIGN_JOB_NAME}${CI_COMMIT_TAG}"
-    - when: always
+        IMAGE_TAG: "${CI_COMMIT_TAG}"
+    - if: $CI_COMMIT_TAG
       variables:
-        IMAGE_TAG: "${SIGN_JOB_NAME}${CI_COMMIT_TAG}-${DIST}"
+        IMAGE_TAG: "${CI_COMMIT_TAG}-${DIST}"
