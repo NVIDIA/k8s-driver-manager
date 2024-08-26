@@ -137,7 +137,7 @@ func main() {
 
 	err := c.Run(os.Args)
 	if err != nil {
-		log.Fatalf(err.Error())
+		log.Fatal(err.Error())
 	}
 }
 
