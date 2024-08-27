@@ -38,8 +38,8 @@ OUT_IMAGE_TAG = $(OUT_IMAGE_VERSION)-$(DIST)
 OUT_IMAGE = $(OUT_IMAGE_NAME):$(OUT_IMAGE_TAG)
 
 ##### Public rules #####
-DISTRIBUTIONS := ubi8
-DEFAULT_PUSH_TARGET := ubi8
+DISTRIBUTIONS := ubi9
+DEFAULT_PUSH_TARGET := ubi9
 
 PUSH_TARGETS := $(patsubst %, push-%, $(DISTRIBUTIONS))
 BUILD_TARGETS := $(patsubst %, build-%, $(DISTRIBUTIONS))
@@ -72,7 +72,7 @@ build-%: DIST = $(*)
 build-%: DOCKERFILE_SUFFIX = $(*)
 build-%: DOCKERFILE = $(CURDIR)/deployments/container/Dockerfile.$(DOCKERFILE_SUFFIX)
 
-# Both ubi8 and build-ubi8 trigger a build of the relevant image
+# Both ubi9 and build-ubi9 trigger a build of the relevant image
 $(DISTRIBUTIONS): %: build-%
 $(BUILD_TARGETS): build-%:
 	DOCKER_BUILDKIT=1 \
