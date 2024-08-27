@@ -7,8 +7,7 @@ updates:
     target-branch: main
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "sunday"
+      interval: "daily"
     labels:
     - dependencies
     groups:
