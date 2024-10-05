@@ -17,11 +17,11 @@ name: Golang
 on:
   pull_request:
     branches:
-    - master
+    - main
     - release-*
   push:
     branches:
-    - master
+    - main
     - release-*
 
 jobs:
