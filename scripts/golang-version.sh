@@ -1,4 +1,5 @@
-# Copyright (c) 2021-2022, NVIDIA CORPORATION.  All rights reserved.
+#!/bin/bash
+# Copyright 2025 NVIDIA CORPORATION
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-VERSION ?= v0.8.0
-MODULE := github.com/NVIDIA/k8s-driver-manager
+SCRIPTS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )"/../hack && pwd )"
 
-vVERSION := v$(VERSION:v%=%)
+DOCKERFILE_ROOT=${SCRIPTS_DIR}/../deployments/devel
 
-GOLANG_VERSION := $(shell ./hack/golang-version.sh)
+GOLANG_VERSION=$(grep -E "^FROM golang:.*$" ${DOCKERFILE_ROOT}/Dockerfile | grep -oE "[0-9\.]+")
 
-BUILDIMAGE_TAG ?= devel-go$(GOLANG_VERSION)
-BUILDIMAGE ?=  $(LIB_NAME):$(BUILDIMAGE_TAG)
+echo $GOLANG_VERSION

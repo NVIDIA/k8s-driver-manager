@@ -16,6 +16,8 @@ DOCKER   ?= docker
 MKDIR    ?= mkdir
 GO       ?= go
 
+MODULE := github.com/NVIDIA/k8s-driver-manager
+
 include $(CURDIR)/versions.mk
 
 ifeq ($(IMAGE_NAME),)
@@ -24,7 +26,7 @@ IMAGE_NAME = $(REGISTRY)/k8s-driver-manager
 endif
 
 CHECK_TARGETS := lint
-MAKE_TARGETS := build check fmt lint-internal test $(CHECK_TARGETS)
+MAKE_TARGETS := build check fmt lint-internal test check-vendor $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS)
 
@@ -52,8 +54,12 @@ lint:
 	golangci-lint run ./...
 
 COVERAGE_FILE := coverage.out
-test: build
-	go test -coverprofile=$(COVERAGE_FILE) $(MODULE)/cmd/...
+test: build cmds
+	go test -coverprofile=$(COVERAGE_FILE).with-mocks $(MODULE)/...
+
+coverage: test
+	cat $(COVERAGE_FILE).with-mocks | grep -v "_mock.go" > $(COVERAGE_FILE)
+	go tool cover -func=$(COVERAGE_FILE)
 
 $(DOCKER_TARGETS): docker-%:
 	@echo "Running 'make $(*)' in container image $(BUILDIMAGE)"
@@ -80,13 +86,28 @@ PHONY: .shell
 		--user $$(id -u):$$(id -g) \
 		$(BUILDIMAGE)
 
-.PHONY: validate-modules
-validate-modules:
-	@echo "- Verifying that the dependencies have expected content..."
-	$(GO) mod verify
-	@echo "- Checking for any unused/missing packages in go.mod..."
-	$(GO) mod tidy
-	@git diff --exit-code -- go.sum go.mod
-	@echo "- Checking if the vendor dir is in sync..."
-	$(GO) mod vendor
-	@git diff --exit-code -- vendor
+vendor:  | mod-tidy mod-vendor mod-verify
+
+mod-tidy:
+	@for mod in $$(find . -name go.mod -not -path "./testdata/*" -not -path "./third_party/*"); do \
+	    echo "Tidying $$mod..."; ( \
+	        cd $$(dirname $$mod) && go mod tidy \
+            ) || exit 1; \
+	done
+
+mod-vendor:
+	@for mod in $$(find . -name go.mod -not -path "./testdata/*" -not -path "./third_party/*" -not -path "./deployments/*"); do \
+		echo "Vendoring $$mod..."; ( \
+			cd $$(dirname $$mod) && go mod vendor \
+			) || exit 1; \
+	done
+
+mod-verify:
+	@for mod in $$(find . -name go.mod -not -path "./testdata/*" -not -path "./third_party/*"); do \
+	    echo "Verifying $$mod..."; ( \
+	        cd $$(dirname $$mod) && go mod verify | sed 's/^/  /g' \
+	    ) || exit 1; \
+	done
+
+check-vendor: vendor
+	git diff --exit-code HEAD -- go.mod go.sum vendor
