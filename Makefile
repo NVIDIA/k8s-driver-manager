@@ -54,7 +54,7 @@ lint:
 	golangci-lint run ./...
 
 COVERAGE_FILE := coverage.out
-test: build cmds
+test: build
 	go test -coverprofile=$(COVERAGE_FILE).with-mocks $(MODULE)/...
 
 coverage: test
