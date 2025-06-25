@@ -1,4 +1,8 @@
-# Copyright (c) 2021-2022, NVIDIA CORPORATION.  All rights reserved.
+//go:build tools
+// +build tools
+
+/**
+# Copyright 2024 NVIDIA CORPORATION
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,13 +15,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+**/
 
-VERSION ?= v0.8.0
-MODULE := github.com/NVIDIA/k8s-driver-manager
+package main
 
-vVERSION := v$(VERSION:v%=%)
-
-GOLANG_VERSION := $(shell ./hack/golang-version.sh)
-
-BUILDIMAGE_TAG ?= devel-go$(GOLANG_VERSION)
-BUILDIMAGE ?=  $(LIB_NAME):$(BUILDIMAGE_TAG)
+// Define the tooling required to build the device plugin.
+import (
+	_ "github.com/golangci/golangci-lint/cmd/golangci-lint"
+	_ "github.com/matryer/moq"
+)
