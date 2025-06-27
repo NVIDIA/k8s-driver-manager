@@ -1,4 +1,4 @@
-#! /bin/bash
+#! /bin/sh
 # Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,7 +36,7 @@ MIG_MANAGER_DEPLOYED=""
 SANDBOX_VALIDATOR_DEPLOYED=""
 SANDBOX_PLUGIN_DEPLOYED=""
 VGPU_DEVICE_MANAGER_DEPLOYED=""
-NODE_LABEL_FOR_GPU_POD_EVICTION=$(echo ${NODE_LABEL_FOR_GPU_POD_EVICTION} | sed -e "s/=.*$//g")
+NODE_LABEL_FOR_GPU_POD_EVICTION=$(echo "${NODE_LABEL_FOR_GPU_POD_EVICTION}" | sed -e "s/=.*$//g")
 CUSTOM_OPERAND_NODE_LABEL_VALUE=""
 AUTO_UPGRADE_POLICY_ENABLED=""
 GPU_DIRECT_RDMA_ENABLED=${GPU_DIRECT_RDMA_ENABLED:-"false"}
@@ -44,8 +44,8 @@ USE_HOST_MOFED=${USE_HOST_MOFED:-"false"}
 
 _drain_k8s_node() {
     echo "Draining node ${NODE_NAME}..."
-    kubectl drain ${NODE_NAME} --ignore-daemonsets=true --force=${DRAIN_USE_FORCE} --pod-selector=${DRAIN_POD_SELECTOR_LABEL} --delete-emptydir-data=${DRAIN_DELETE_EMPTYDIR_DATA} --timeout=${DRAIN_TIMEOUT_SECONDS}
-    if [ "$?" != "0" ]; then
+    kubectl drain "${NODE_NAME}" --ignore-daemonsets=true --force="${DRAIN_USE_FORCE}" --pod-selector="${DRAIN_POD_SELECTOR_LABEL}" --delete-emptydir-data="${DRAIN_DELETE_EMPTYDIR_DATA}" --timeout="${DRAIN_TIMEOUT_SECONDS}"
+    if [ $? -ne 0 ]; then
         return 1
     fi
     return 0
@@ -53,8 +53,8 @@ _drain_k8s_node() {
 
 _nvdrain_k8s_node() {
     echo "Draining node ${NODE_NAME} of any GPU pods..."
-    nvdrain --debug=${NVDRAIN_DEBUG} --node-name=${NODE_NAME} --kubeconfig=${KUBECONFIG} --force=${DRAIN_USE_FORCE} --delete-emptydir-data=${DRAIN_DELETE_EMPTYDIR_DATA} --timeout=${DRAIN_TIMEOUT_SECONDS}
-    if [ "$?" != "0" ]; then
+    nvdrain --debug="${NVDRAIN_DEBUG}" --node-name="${NODE_NAME}" --kubeconfig="${KUBECONFIG}" --force="${DRAIN_USE_FORCE}" --delete-emptydir-data="${DRAIN_DELETE_EMPTYDIR_DATA}" --timeout="${DRAIN_TIMEOUT_SECONDS}"
+    if [ $? -ne 0 ]; then
         return 1
     fi
     return 0
@@ -98,7 +98,7 @@ _is_driver_auto_upgrade_policy_enabled() {
 # be 'false' if some external entity has forced it to this value, at which point
 # we want to honor it's existing value and not change it.
 _maybe_set_paused() {
-    local current_value="${1}"
+    current_value="${1}"
     if [  "${current_value}" = "" ]; then
         # disabled by user with empty value, retain it
         echo ""
@@ -108,7 +108,7 @@ _maybe_set_paused() {
     elif [  "${current_value}" = "true" ]; then
         # disable
         echo "${PAUSED_STR}"
-    elif [[ "${current_value}" == *"${PAUSED_STR}"* ]]; then
+    elif echo "${current_value}" | grep -q "${PAUSED_STR}"; then
         # already added paused status for driver upgrade
         echo "${current_value}"
     else
@@ -121,7 +121,7 @@ _maybe_set_paused() {
 # be 'false' if some external entity has forced it to this value, at which point
 # we want to honor it's existing value and not change it.
 _maybe_set_true() {
-    local current_value="${1}"
+    current_value="${1}"
     if [ "${current_value}" = "false" ]; then
         # disabled by user
         echo "false"
@@ -135,8 +135,8 @@ _maybe_set_true() {
 }
 
 _fetch_auto_upgrade_annotation() {
-    AUTO_UPGRADE_POLICY_ENABLED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.annotations.nvidia\.com/gpu-driver-upgrade-enabled}')
-    if [ "${?}" != "0" ]; then
+    AUTO_UPGRADE_POLICY_ENABLED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.annotations.nvidia\.com/gpu-driver-upgrade-enabled}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu-driver-upgrade-enabled' annotation"
         exit 1
     fi
@@ -145,88 +145,88 @@ _fetch_auto_upgrade_annotation() {
 
 _fetch_current_labels() {
     echo "Getting current value of the 'nvidia.com/gpu.deploy.operator-validator' node label"
-    VALIDATOR_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.operator-validator}')
-    if [ "${?}" != "0" ]; then
+    VALIDATOR_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.operator-validator}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.operator-validator' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.operator-validator=${VALIDATOR_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.container-toolkit' node label"
-    TOOLKIT_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.container-toolkit}')
-    if [ "${?}" != "0" ]; then
+    TOOLKIT_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.container-toolkit}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.container-toolkit' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.container-toolkit=${TOOLKIT_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.device-plugin' node label"
-    PLUGIN_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.device-plugin}')
-    if [ "${?}" != "0" ]; then
+    PLUGIN_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.device-plugin}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.device-plugin' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.device-plugin=${PLUGIN_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.gpu-feature-discovery' node label"
-    GFD_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.gpu-feature-discovery}')
-    if [ "${?}" != "0" ]; then
+    GFD_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.gpu-feature-discovery}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.gpu-feature-discovery' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.gpu-feature-discovery=${GFD_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.dcgm-exporter' node label"
-    DCGM_EXPORTER_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.dcgm-exporter}')
-    if [ "${?}" != "0" ]; then
+    DCGM_EXPORTER_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.dcgm-exporter}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.dcgm-exporter' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.dcgm-exporter=${DCGM_EXPORTER_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.dcgm' node label"
-    DCGM_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.dcgm}')
-    if [ "${?}" != "0" ]; then
+    DCGM_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.dcgm}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.dcgm' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.dcgm=${DCGM_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.mig-manager' node label"
-    MIG_MANAGER_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.mig-manager}')
-    if [ "${?}" != "0" ]; then
+    MIG_MANAGER_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.mig-manager}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.mig-manager' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.mig-manager=${MIG_MANAGER_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.nvsm' node label"
-    NVSM_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.nvsm}')
-    if [ "${?}" != "0" ]; then
+    NVSM_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.nvsm}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.nvsm' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.nvsm=${NVSM_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.sandbox-validator' node label"
-    SANDBOX_VALIDATOR_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.sandbox-validator}')
-    if [ "${?}" != "0" ]; then
+    SANDBOX_VALIDATOR_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.sandbox-validator}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.sandbox-validator' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.sandbox-validator=${SANDBOX_VALIDATOR_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.sandbox-device-plugin' node label"
-    SANDBOX_PLUGIN_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.sandbox-device-plugin}')
-    if [ "${?}" != "0" ]; then
+    SANDBOX_PLUGIN_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.sandbox-device-plugin}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.sandbox-device-plugin' label"
         exit 1
     fi
     echo "Current value of 'nvidia.com/gpu.deploy.sandbox-device-plugin=${SANDBOX_PLUGIN_DEPLOYED}'"
 
     echo "Getting current value of the 'nvidia.com/gpu.deploy.vgpu-device-manager' node label"
-    VGPU_DEVICE_MANAGER_DEPLOYED=$(kubectl get nodes ${NODE_NAME} -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.vgpu-device-manager}')
-    if [ "${?}" != "0" ]; then
+    VGPU_DEVICE_MANAGER_DEPLOYED=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath='{$.metadata.labels.nvidia\.com/gpu\.deploy\.vgpu-device-manager}')
+    if [ $? -ne 0 ]; then
         echo "Unable to get the value of the 'nvidia.com/gpu.deploy.vgpu-device-manager' label"
         exit 1
     fi
@@ -234,10 +234,10 @@ _fetch_current_labels() {
 
     if [ "${NODE_LABEL_FOR_GPU_POD_EVICTION}" != "" ]; then
         echo "Getting current value of the '${NODE_LABEL_FOR_GPU_POD_EVICTION}' node label used by custom operands"
-        LABEL_KEY=$(echo $NODE_LABEL_FOR_GPU_POD_EVICTION | sed -e "s/\./\\\./g")
+        LABEL_KEY=$(echo "${NODE_LABEL_FOR_GPU_POD_EVICTION}" | sed -e "s/\./\\\./g")
         JSON_LABEL_PATH="{$.metadata.labels.$LABEL_KEY}"
-        CUSTOM_OPERAND_NODE_LABEL_VALUE=$(kubectl get nodes ${NODE_NAME} -o=jsonpath=${JSON_LABEL_PATH})
-        if [ "${?}" != "0" ]; then
+        CUSTOM_OPERAND_NODE_LABEL_VALUE=$(kubectl get nodes "${NODE_NAME}" -o=jsonpath="${JSON_LABEL_PATH}")
+        if [ $? -ne 0 ]; then
             echo "Unable to get the value of the '${NODE_LABEL_FOR_GPU_POD_EVICTION}' label"
             exit 1
         fi
@@ -248,13 +248,12 @@ _fetch_current_labels() {
 _evict_required_gpu_operator_components() {
     echo "Shutting GPU Operator components that must be restarted on driver restarts by disabling their component-specific nodeSelector labels"
     kubectl label --overwrite \
-        node ${NODE_NAME} \
-        nvidia.com/gpu.deploy.operator-validator=$(_maybe_set_paused ${VALIDATOR_DEPLOYED}) \
-        nvidia.com/gpu.deploy.sandbox-validator=$(_maybe_set_paused ${SANDBOX_VALIDATOR_DEPLOYED}) \
-        nvidia.com/gpu.deploy.sandbox-device-plugin=$(_maybe_set_paused ${SANDBOX_PLUGIN_DEPLOYED}) \
-        nvidia.com/gpu.deploy.vgpu-device-manager=$(_maybe_set_paused ${VGPU_DEVICE_MANAGER_DEPLOYED})
-
-    if [ "$?" != "0" ]; then
+        node "${NODE_NAME}" \
+        nvidia.com/gpu.deploy.operator-validator="$(_maybe_set_paused "${VALIDATOR_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.sandbox-validator="$(_maybe_set_paused "${SANDBOX_VALIDATOR_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.sandbox-device-plugin="$(_maybe_set_paused "${SANDBOX_PLUGIN_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.vgpu-device-manager="$(_maybe_set_paused "${VGPU_DEVICE_MANAGER_DEPLOYED}")"
+    if [ $? -ne 0 ]; then
         return 1
     fi
 
@@ -262,7 +261,7 @@ _evict_required_gpu_operator_components() {
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n ${OPERATOR_NAMESPACE} \
+        -n "${OPERATOR_NAMESPACE}" \
         -l app=nvidia-operator-validator
 
     if [ "${SANDBOX_VALIDATOR_DEPLOYED}" != "" ]; then
@@ -270,7 +269,7 @@ _evict_required_gpu_operator_components() {
         kubectl wait --for=delete pod \
             --timeout=5m \
             --field-selector "spec.nodeName=${NODE_NAME}" \
-            -n ${OPERATOR_NAMESPACE} \
+            -n "${OPERATOR_NAMESPACE}" \
             -l app=nvidia-sandbox-validator
     fi
 
@@ -279,7 +278,7 @@ _evict_required_gpu_operator_components() {
         kubectl wait --for=delete pod \
             --timeout=5m \
             --field-selector "spec.nodeName=${NODE_NAME}" \
-            -n ${OPERATOR_NAMESPACE} \
+            -n "${OPERATOR_NAMESPACE}" \
             -l app=nvidia-sandbox-device-plugin-daemonset
     fi
 
@@ -288,7 +287,7 @@ _evict_required_gpu_operator_components() {
         kubectl wait --for=delete pod \
             --timeout=5m \
             --field-selector "spec.nodeName=${NODE_NAME}" \
-            -n ${OPERATOR_NAMESPACE} \
+            -n "${OPERATOR_NAMESPACE}" \
             -l app=nvidia-vgpu-device-manager
     fi
 
@@ -298,38 +297,36 @@ _evict_required_gpu_operator_components() {
 _evict_all_gpu_operator_components() {
     echo "Shutting down all GPU clients on the current node by disabling their component-specific nodeSelector labels"
     kubectl label --overwrite \
-        node ${NODE_NAME} \
-        nvidia.com/gpu.deploy.operator-validator=$(_maybe_set_paused ${VALIDATOR_DEPLOYED}) \
-        nvidia.com/gpu.deploy.container-toolkit=$(_maybe_set_paused ${TOOLKIT_DEPLOYED}) \
-        nvidia.com/gpu.deploy.device-plugin=$(_maybe_set_paused ${PLUGIN_DEPLOYED}) \
-        nvidia.com/gpu.deploy.gpu-feature-discovery=$(_maybe_set_paused ${GFD_DEPLOYED}) \
-        nvidia.com/gpu.deploy.dcgm-exporter=$(_maybe_set_paused ${DCGM_EXPORTER_DEPLOYED}) \
-        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_paused ${DCGM_DEPLOYED}) \
-        nvidia.com/gpu.deploy.nvsm=$(_maybe_set_paused ${NVSM_DEPLOYED}) \
-        nvidia.com/gpu.deploy.sandbox-device-plugin=$(_maybe_set_paused ${SANDBOX_PLUGIN_DEPLOYED}) \
-        nvidia.com/gpu.deploy.sandbox-validator=$(_maybe_set_paused ${SANDBOX_VALIDATOR_DEPLOYED}) \
-        nvidia.com/gpu.deploy.vgpu-device-manager=$(_maybe_set_paused ${VGPU_DEVICE_MANAGER_DEPLOYED})
-
-    if [ "$?" != "0" ]; then
+        node "${NODE_NAME}" \
+        nvidia.com/gpu.deploy.operator-validator="$(_maybe_set_paused "${VALIDATOR_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.container-toolkit="$(_maybe_set_paused "${TOOLKIT_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.device-plugin="$(_maybe_set_paused "${PLUGIN_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.gpu-feature-discovery="$(_maybe_set_paused "${GFD_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.dcgm-exporter="$(_maybe_set_paused "${DCGM_EXPORTER_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.dcgm="$(_maybe_set_paused "${DCGM_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.nvsm="$(_maybe_set_paused "${NVSM_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.sandbox-device-plugin="$(_maybe_set_paused "${SANDBOX_PLUGIN_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.sandbox-validator="$(_maybe_set_paused "${SANDBOX_VALIDATOR_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.vgpu-device-manager="$(_maybe_set_paused "${VGPU_DEVICE_MANAGER_DEPLOYED}")"
+    if [ $? -ne 0 ]; then
         return 1
     fi
 
     # check if a custom operand node selector label is provided for eviction
     if [ "${CUSTOM_OPERAND_NODE_LABEL_VALUE}" != "" ]; then
         echo "Shutting down GPU clients using node selector label ${NODE_LABEL_FOR_GPU_POD_EVICTION}=${CUSTOM_OPERAND_NODE_LABEL_VALUE}"
-        kubectl label --overwrite node ${NODE_NAME} \
-            ${NODE_LABEL_FOR_GPU_POD_EVICTION}=$(_maybe_set_paused ${CUSTOM_OPERAND_NODE_LABEL_VALUE})
-
-        if [ "$?" != "0" ]; then
+        kubectl label --overwrite node "${NODE_NAME}" \
+            "${NODE_LABEL_FOR_GPU_POD_EVICTION}=$(_maybe_set_paused "${CUSTOM_OPERAND_NODE_LABEL_VALUE}")"
+        if [ $? -ne 0 ]; then
             return 1
         fi
     fi
 
     if [ "${MIG_MANAGER_DEPLOYED}" != "" ]; then
         kubectl label --overwrite \
-            node ${NODE_NAME} \
-            nvidia.com/gpu.deploy.mig-manager=$(_maybe_set_paused ${MIG_MANAGER_DEPLOYED})
-        if [ "$?" != "0" ]; then
+            node "${NODE_NAME}" \
+            nvidia.com/gpu.deploy.mig-manager="$(_maybe_set_paused "${MIG_MANAGER_DEPLOYED}")"
+        if [ $? -ne 0 ]; then
             return 1
         fi
     fi
@@ -338,42 +335,42 @@ _evict_all_gpu_operator_components() {
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n ${OPERATOR_NAMESPACE} \
+        -n "${OPERATOR_NAMESPACE}" \
         -l app=nvidia-operator-validator
 
     echo "Waiting for the container-toolkit to shutdown"
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n ${OPERATOR_NAMESPACE} \
+        -n "${OPERATOR_NAMESPACE}" \
         -l app=nvidia-container-toolkit-daemonset
 
     echo "Waiting for the device-plugin to shutdown"
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n ${OPERATOR_NAMESPACE} \
+        -n "${OPERATOR_NAMESPACE}" \
         -l app=nvidia-device-plugin-daemonset
 
     echo "Waiting for gpu-feature-discovery to shutdown"
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n ${OPERATOR_NAMESPACE} \
+        -n "${OPERATOR_NAMESPACE}" \
         -l app=gpu-feature-discovery
 
     echo "Waiting for dcgm-exporter to shutdown"
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n ${OPERATOR_NAMESPACE} \
+        -n "${OPERATOR_NAMESPACE}" \
         -l app=nvidia-dcgm-exporter
 
     echo "Waiting for dcgm to shutdown"
     kubectl wait --for=delete pod \
         --timeout=5m \
         --field-selector "spec.nodeName=${NODE_NAME}" \
-        -n ${OPERATOR_NAMESPACE} \
+        -n "${OPERATOR_NAMESPACE}" \
         -l app=nvidia-dcgm
 
     if [ "${MIG_MANAGER_DEPLOYED}" != "" ]; then
@@ -381,7 +378,7 @@ _evict_all_gpu_operator_components() {
         kubectl wait --for=delete pod \
             --timeout=5m \
             --field-selector "spec.nodeName=${NODE_NAME}" \
-            -n ${OPERATOR_NAMESPACE} \
+            -n "${OPERATOR_NAMESPACE}" \
             -l app=nvidia-mig-manager
     fi
 
@@ -390,7 +387,7 @@ _evict_all_gpu_operator_components() {
         kubectl wait --for=delete pod \
             --timeout=5m \
             --field-selector "spec.nodeName=${NODE_NAME}" \
-            -n ${OPERATOR_NAMESPACE} \
+            -n "${OPERATOR_NAMESPACE}" \
             -l app=nvidia-sandbox-validator
     fi
 
@@ -399,7 +396,7 @@ _evict_all_gpu_operator_components() {
         kubectl wait --for=delete pod \
             --timeout=5m \
             --field-selector "spec.nodeName=${NODE_NAME}" \
-            -n ${OPERATOR_NAMESPACE} \
+            -n "${OPERATOR_NAMESPACE}" \
             -l app=nvidia-sandbox-device-plugin-daemonset
     fi
 
@@ -408,7 +405,7 @@ _evict_all_gpu_operator_components() {
         kubectl wait --for=delete pod \
             --timeout=5m \
             --field-selector "spec.nodeName=${NODE_NAME}" \
-            -n ${OPERATOR_NAMESPACE} \
+            -n "${OPERATOR_NAMESPACE}" \
             -l app=nvidia-vgpu-device-manager
     fi
 
@@ -418,8 +415,8 @@ _evict_all_gpu_operator_components() {
 
 _cordon_k8s_node() {
     echo "Cordoning node ${NODE_NAME}..."
-    kubectl cordon ${NODE_NAME}
-    if [ "$?" != "0" ]; then
+    kubectl cordon "${NODE_NAME}"
+    if [ $? -ne 0 ]; then
         return 1
     fi
     return 0
@@ -427,8 +424,8 @@ _cordon_k8s_node() {
 
 _uncordon_k8s_node() {
     echo "Uncordoning node ${NODE_NAME}..."
-    kubectl uncordon ${NODE_NAME}
-    if [ "$?" != "0" ]; then
+    kubectl uncordon "${NODE_NAME}"
+    if [ $? -ne 0 ]; then
         return 1
     fi
     return 0
@@ -437,37 +434,36 @@ _uncordon_k8s_node() {
 _reschedule_gpu_operator_components() {
     echo "Rescheduling all GPU clients on the current node by enabling their component-specific nodeSelector labels"
     kubectl label --overwrite \
-        node ${NODE_NAME} \
-        nvidia.com/gpu.deploy.operator-validator=$(_maybe_set_true ${VALIDATOR_DEPLOYED}) \
-        nvidia.com/gpu.deploy.container-toolkit=$(_maybe_set_true ${TOOLKIT_DEPLOYED}) \
-        nvidia.com/gpu.deploy.device-plugin=$(_maybe_set_true ${PLUGIN_DEPLOYED}) \
-        nvidia.com/gpu.deploy.gpu-feature-discovery=$(_maybe_set_true ${GFD_DEPLOYED}) \
-        nvidia.com/gpu.deploy.dcgm-exporter=$(_maybe_set_true ${DCGM_EXPORTER_DEPLOYED}) \
-        nvidia.com/gpu.deploy.dcgm=$(_maybe_set_true ${DCGM_DEPLOYED}) \
-        nvidia.com/gpu.deploy.nvsm=$(_maybe_set_true ${NVSM_DEPLOYED}) \
-        nvidia.com/gpu.deploy.sandbox-validator=$(_maybe_set_true ${SANDBOX_VALIDATOR_DEPLOYED}) \
-        nvidia.com/gpu.deploy.sandbox-device-plugin=$(_maybe_set_true ${SANDBOX_PLUGIN_DEPLOYED}) \
-        nvidia.com/gpu.deploy.vgpu-device-manager=$(_maybe_set_true ${VGPU_DEVICE_MANAGER_DEPLOYED})
-
-    if [ "$?" != "0" ]; then
+        node "${NODE_NAME}" \
+        nvidia.com/gpu.deploy.operator-validator="$(_maybe_set_true "${VALIDATOR_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.container-toolkit="$(_maybe_set_true "${TOOLKIT_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.device-plugin="$(_maybe_set_true "${PLUGIN_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.gpu-feature-discovery="$(_maybe_set_true "${GFD_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.dcgm-exporter="$(_maybe_set_true "${DCGM_EXPORTER_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.dcgm="$(_maybe_set_true "${DCGM_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.nvsm="$(_maybe_set_true "${NVSM_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.sandbox-validator="$(_maybe_set_true "${SANDBOX_VALIDATOR_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.sandbox-device-plugin="$(_maybe_set_true "${SANDBOX_PLUGIN_DEPLOYED}")" \
+        nvidia.com/gpu.deploy.vgpu-device-manager="$(_maybe_set_true "${VGPU_DEVICE_MANAGER_DEPLOYED}")"
+    if [ $? -ne 0 ]; then
         return 1
     fi
 
     # check for custom operand node selector label
     if [ "${CUSTOM_OPERAND_NODE_LABEL_VALUE}" != "" ]; then
         echo "Restarting GPU clients using node selector label ${NODE_LABEL_FOR_GPU_POD_EVICTION}=${CUSTOM_OPERAND_NODE_LABEL_VALUE}"
-        kubectl label --overwrite node ${NODE_NAME} \
-            ${NODE_LABEL_FOR_GPU_POD_EVICTION}=$(_maybe_set_true ${CUSTOM_OPERAND_NODE_LABEL_VALUE})
-        if [ "$?" != "0" ]; then
+        kubectl label --overwrite node "${NODE_NAME}" \
+            "${NODE_LABEL_FOR_GPU_POD_EVICTION}=$(_maybe_set_true "${CUSTOM_OPERAND_NODE_LABEL_VALUE}")"
+        if [ $? -ne 0 ]; then
             return 1
         fi
     fi
 
     if [ "${MIG_MANAGER_DEPLOYED}" != "" ]; then
         kubectl label --overwrite \
-            node ${NODE_NAME} \
-            nvidia.com/gpu.deploy.mig-manager=$(_maybe_set_true ${MIG_MANAGER_DEPLOYED})
-        if [ "$?" != "0" ]; then
+            node "${NODE_NAME}" \
+            nvidia.com/gpu.deploy.mig-manager="$(_maybe_set_true "${MIG_MANAGER_DEPLOYED}")"
+        if [ $? -ne 0 ]; then
             return 1
         fi
     fi
@@ -492,7 +488,7 @@ _unload_nouveau() {
     if [ -f /sys/module/nouveau/refcnt ]; then
         echo "Unloading nouveau driver..."
         rmmod nouveau
-        if [ "$?" != "0" ]; then
+        if [ $? -ne 0 ]; then
             echo "Failed to unload nouveau driver"
             return 1
         fi
@@ -522,7 +518,7 @@ _host_driver() {
     # check if driver is pre-installed on the host
     if [ -f /host/usr/bin/nvidia-smi ] || [ -L /host/usr/bin/nvidia-smi ]; then
         DRIVER_VERSION=$(chroot /host nvidia-smi --query-gpu=driver_version --format=csv,noheader)
-        if [ $? == 0 ] && [ ! -z "${DRIVER_VERSION}" ]; then
+        if [ $? -eq 0 ] && [ -n "${DRIVER_VERSION}" ]; then
             return 0
         fi
     fi
@@ -532,11 +528,10 @@ _host_driver() {
 
 # Check if mellanox devices are present
 _mellanox_devices_present() {
-    devices_found=0
     for dev in /sys/bus/pci/devices/*; do
-        read vendor < $dev/vendor
-        if [ "$vendor" = "0x15b3" ]; then
-            echo "Mellanox device found at $(basename $dev)"
+        read -r vendor < "${dev}/vendor"
+        if [ "${vendor}" = "0x15b3" ]; then
+            echo "Mellanox device found at $(basename "${dev}")"
             return 0
         fi
     done
@@ -575,7 +570,7 @@ uninstall_driver() {
     if _host_driver; then
         echo "NVIDIA GPU driver is already pre-installed on the node, disabling the containerized driver on the node"
         kubectl label --overwrite \
-          node ${NODE_NAME} \
+          node "${NODE_NAME}" \
           nvidia.com/gpu.deploy.driver=pre-installed
         # add wait here as pod termination can take 30s due to default grace-period
         sleep 60
@@ -595,7 +590,7 @@ uninstall_driver() {
     if _is_gpu_pod_eviction_enabled; then
         _cordon_k8s_node
         _nvdrain_k8s_node
-        if [ "$?" != "0" ]; then
+        if [ $? -ne 0 ]; then
             # nvdrain will only return non-zero code when GPU pods
             # are running on the node and cannot be deleted. Attempt
             # to drain the node in this case.
@@ -605,9 +600,14 @@ uninstall_driver() {
                 _exit_failed
             fi
             echo "Attempting node drain"
-            trap '_exit_failed' ERR
-            _drain_k8s_node
-            _cleanup_driver
+            if ! _drain_k8s_node; then
+                echo "Failed to drain node"
+                _exit_failed
+            fi
+            if ! _cleanup_driver; then
+                echo "Failed to cleanup NVIDIA driver"
+                _exit_failed
+            fi
         fi
     fi
 
@@ -615,12 +615,17 @@ uninstall_driver() {
     # check if driver is already loaded
     if _driver_loaded; then
         _cleanup_driver
-        if [ "$?" != "0" ]; then
+        if [ $? -ne 0 ]; then
             if _is_auto_drain_enabled; then
                 echo "Unable to cleanup driver modules, attempting again with node drain..."
-                trap '_exit_failed' ERR
-                _drain_k8s_node
-                _cleanup_driver
+                if ! _drain_k8s_node; then
+                    echo "Failed to drain node"
+                    _exit_failed
+                fi
+                if ! _cleanup_driver; then
+                    echo "Failed to cleanup NVIDIA driver"
+                    _exit_failed
+                fi
             else
                 echo "Failed to uninstall nvidia driver components"
                 _exit_failed
@@ -634,7 +639,7 @@ uninstall_driver() {
     # devices will not be bound to any driver, so the below unbind operation
     # will be a no-op.
     vfio-manage unbind --all
-    if [ "$?" != "0" ]; then
+    if [ $? -ne 0 ]; then
         echo "Unable to unbind vfio-pci driver from all devices"
         _exit_failed
     fi
@@ -655,7 +660,7 @@ uninstall_driver() {
     # check for nouveau driver and unload it before driver nvidia installation
     if _nouveau_loaded; then
         _unload_nouveau
-        if [ "$?" != "0" ]; then
+        if [ $? -ne 0 ]; then
             exit 1
         fi
         echo "Successfully unloaded nouveau driver"
@@ -672,53 +677,53 @@ preflight_check() {
 
 # Unload the kernel modules if they are currently loaded.
 _unload_driver() {
-    local rmmod_args=()
-    local nvidia_deps=0
-    local nvidia_refs=0
-    local nvidia_uvm_refs=0
-    local nvidia_modeset_refs=0
-    local nvidia_peermem_refs=0
-    local nvidia_vgpu_vfio_refs=0
-    local nvidia_fs_refs=0
-    local gdrdrv_refs=0
+    rmmod_args=""
+    nvidia_deps=0
+    nvidia_refs=0
+    nvidia_uvm_refs=0
+    nvidia_modeset_refs=0
+    nvidia_peermem_refs=0
+    nvidia_vgpu_vfio_refs=0
+    nvidia_fs_refs=0
+    gdrdrv_refs=0
 
     echo "Unloading NVIDIA driver kernel modules..."
     if [ -f /sys/module/nvidia_modeset/refcnt ]; then
-        nvidia_modeset_refs=$(< /sys/module/nvidia_modeset/refcnt)
-        rmmod_args+=("nvidia-modeset")
-        ((++nvidia_deps))
+        nvidia_modeset_refs=$(cat /sys/module/nvidia_modeset/refcnt)
+        rmmod_args="${rmmod_args} nvidia-modeset"
+        nvidia_deps=$((nvidia_deps + 1))
     fi
     if [ -f /sys/module/nvidia_uvm/refcnt ]; then
-        nvidia_uvm_refs=$(< /sys/module/nvidia_uvm/refcnt)
-        rmmod_args+=("nvidia-uvm")
-        ((++nvidia_deps))
+        nvidia_uvm_refs=$(cat /sys/module/nvidia_uvm/refcnt)
+        rmmod_args="${rmmod_args} nvidia-uvm"
+        nvidia_deps=$((nvidia_deps + 1))
     fi
     if [ -f /sys/module/nvidia_peermem/refcnt ]; then
-        nvidia_peermem_refs=$(< /sys/module/nvidia_peermem/refcnt)
-        rmmod_args+=("nvidia-peermem")
-        ((++nvidia_deps))
+        nvidia_peermem_refs=$(cat /sys/module/nvidia_peermem/refcnt)
+        rmmod_args="${rmmod_args} nvidia-peermem"
+        nvidia_deps=$((nvidia_deps + 1))
     fi
     if [ -f /sys/module/nvidia_fs/refcnt ]; then
-        nvidia_fs_refs=$(< /sys/module/nvidia_fs/refcnt)
-        rmmod_args+=("nvidia-fs")
-        ((++nvidia_deps))
+        nvidia_fs_refs=$(cat /sys/module/nvidia_fs/refcnt)
+        rmmod_args="${rmmod_args} nvidia-fs"
+        nvidia_deps=$((nvidia_deps + 1))
     fi
     if [ -f /sys/module/nvidia_vgpu_vfio/refcnt ]; then
-        nvidia_vgpu_vfio_refs=$(< /sys/module/nvidia_vgpu_vfio/refcnt)
-        rmmod_args+=("nvidia_vgpu_vfio")
-        ((++nvidia_deps))
+        nvidia_vgpu_vfio_refs=$(cat /sys/module/nvidia_vgpu_vfio/refcnt)
+        rmmod_args="${rmmod_args} nvidia_vgpu_vfio"
+        nvidia_deps=$((nvidia_deps + 1))
     fi
     if [ -f /sys/module/gdrdrv/refcnt ]; then
-            gdrdrv_refs=$(< /sys/module/gdrdrv/refcnt)
-            rmmod_args+=("gdrdrv")
-            ((++nvidia_deps))
+            gdrdrv_refs=$(cat /sys/module/gdrdrv/refcnt)
+            rmmod_args="${rmmod_args} gdrdrv"
+            nvidia_deps=$((nvidia_deps + 1))
     fi
     if [ -f /sys/module/nvidia/refcnt ]; then
-        nvidia_refs=$(< /sys/module/nvidia/refcnt)
-        rmmod_args+=("nvidia")
+        nvidia_refs=$(cat /sys/module/nvidia/refcnt)
+        rmmod_args="${rmmod_args} nvidia"
     fi
 
-    if [ ${nvidia_refs} -gt ${nvidia_deps} ] && [ ${nvidia_refs} -eq 2 ] && [[ " ${rmmod_args} " =~ " nvidia_vgpu_vfio " ]]; then
+    if [ "${nvidia_refs}" -gt "${nvidia_deps}" ] && [ "${nvidia_refs}" -eq 2 ] && echo " ${rmmod_args} " | grep -q " nvidia_vgpu_vfio "; then
         # When cleaning up a previous vGPU Manager install, it is possible $nvidia_refs > $nvidia_deps
         # since nvidia_vgpu_vfio holds 2 handles on the driver. Catch this case and proceed to unload driver modules.
         #     $ lsmod | grep nvidia
@@ -726,16 +731,15 @@ _unload_driver() {
         #     nvidia              35315712  2
         #     mdev                   24576  2 vfio_mdev,nvidia_vgpu_vfio
         :
-    elif [ ${nvidia_refs} -gt ${nvidia_deps} ] || [ ${nvidia_uvm_refs} -gt 0 ] || [ ${nvidia_modeset_refs} -gt 0 ] || [ ${nvidia_peermem_refs} -gt 0 ] || [ ${nvidia_vgpu_vfio_refs} -gt 0 ] || [ ${nvidia_fs_refs} -gt 0 ] || [ ${gdrdrv_refs} -gt 0 ]; then
+    elif [ "${nvidia_refs}" -gt "${nvidia_deps}" ] || [ "${nvidia_uvm_refs}" -gt 0 ] || [ "${nvidia_modeset_refs}" -gt 0 ] || [ "${nvidia_peermem_refs}" -gt 0 ] || [ "${nvidia_vgpu_vfio_refs}" -gt 0 ] || [ "${nvidia_fs_refs}" -gt 0 ] || [ "${gdrdrv_refs}" -gt 0 ]; then
         # run lsmod to debug module usage
         lsmod | grep nvidia
         echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
         return 1
     fi
 
-    if [ ${#rmmod_args[@]} -gt 0 ]; then
-        rmmod ${rmmod_args[@]}
-        if [ "$?" != "0" ]; then
+    if [ -n "${rmmod_args}" ]; then
+        if ! rmmod "${rmmod_args}"; then
             return 1
         fi
     fi
@@ -754,11 +758,11 @@ _unmount_rootfs() {
 
 _cleanup_driver() {
     _unload_driver
-    if [ "$?" != "0" ]; then
+    if [ $? -ne 0 ]; then
         return 1
     fi
     _unmount_rootfs
-    if [ "$?" != "0" ]; then
+    if [ $? -ne 0 ]; then
         return 1
     fi
     if [ -f ${DRIVER_PID_FILE} ]; then
