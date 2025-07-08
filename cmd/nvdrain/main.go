@@ -219,7 +219,7 @@ func nvdrainWrapper(c *cli.Context, f *flags) error {
 		for _, err := range errs {
 			log.Errorf("error reported by drain helper: %v", err)
 		}
-		return fmt.Errorf("Failed to delete all GPU pods")
+		return fmt.Errorf("failed to delete all GPU pods")
 	}
 
 	for _, p := range podDeleteList.Pods() {
@@ -238,7 +238,7 @@ func nvdrainWrapper(c *cli.Context, f *flags) error {
 	log.Info("Deleting GPU pods...")
 	err = drainHelper.DeleteOrEvictPods(podDeleteList.Pods())
 	if err != nil {
-		return fmt.Errorf("Failed to delete all GPU pods: %v", err)
+		return fmt.Errorf("failed to delete all GPU pods: %w", err)
 	}
 
 	return nil
