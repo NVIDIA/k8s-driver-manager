@@ -56,6 +56,8 @@ RUN ln -s /busybox/sh /bin/sh
 
 COPY driver-manager /usr/bin
 COPY scripts/vfio-manage /usr/bin
+
+COPY --from=build /usr/bin/findmnt /usr/bin
 COPY --from=build /work/nvdrain /usr/bin
 COPY --from=build /work/kubectl /usr/bin
 
