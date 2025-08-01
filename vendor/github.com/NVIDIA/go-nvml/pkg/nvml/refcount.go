@@ -1,4 +1,5 @@
-# Copyright (c) 2021-2022, NVIDIA CORPORATION.  All rights reserved.
+/**
+# Copyright 2024 NVIDIA CORPORATION
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,15 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+**/
 
-VERSION ?= v0.8.0
-MODULE := github.com/NVIDIA/k8s-driver-manager
+package nvml
 
-vVERSION := v$(VERSION:v%=%)
+type refcount int
 
-GOLANG_VERSION := $(shell ./scripts/golang-version.sh)
+func (r *refcount) IncOnNoError(err error) {
+	if err == nil {
+		(*r)++
+	}
+}
 
-BUILDIMAGE_TAG ?= devel-go$(GOLANG_VERSION)
-BUILDIMAGE ?=  $(LIB_NAME):$(BUILDIMAGE_TAG)
-
-GIT_COMMIT ?= $(shell git describe --match="" --dirty --long --always --abbrev=40 2> /dev/null || echo "")
+func (r *refcount) DecOnNoError(err error) {
+	if err == nil && (*r) > 0 {
+		(*r)--
+	}
+}

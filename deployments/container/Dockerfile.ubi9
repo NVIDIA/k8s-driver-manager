@@ -19,7 +19,8 @@ WORKDIR /work
 COPY go.mod go.mod
 COPY go.sum go.sum
 COPY vendor vendor
-COPY cmd/nvdrain cmd/nvdrain
+COPY cmd/driver-manager cmd/driver-manager
+COPY internal/ internal/
 
 RUN dnf install -y wget make git gcc
 
@@ -39,25 +40,24 @@ RUN set -eux; \
 ENV GOPATH /go
 ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
 
-RUN GOOS=linux go build -o nvdrain ./cmd/nvdrain
+# Build
+ARG VERSION="unknown"
+ARG GIT_COMMIT="unknown"
+ARG VERSION_PKG="github.com/NVIDIA/k8s-driver-manager/internal/info"
+RUN go build -ldflags "-extldflags=-Wl,-z,lazy -s -w -X ${VERSION_PKG}.gitCommit=${GIT_COMMIT} -X ${VERSION_PKG}.version=${VERSION}" \
+       -o driver-manager ./cmd/driver-manager/
 
 ARG TARGETARCH
 
-# Install K8s client to fetch node resources, cluster version and to perform cleanup of pods for driver unload
-RUN OS_ARCH=${TARGETARCH/x86_64/amd64} && OS_ARCH=${OS_ARCH/aarch64/arm64} && curl -o ./kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${OS_ARCH}/kubectl";
-RUN chmod a+x ./kubectl
-
-FROM nvcr.io/nvidia/distroless/go:v3.1.11-dev
+FROM nvcr.io/nvidia/distroless/cc:v3.1.11-dev
 
 USER 0:0
 
 SHELL ["/busybox/sh", "-c"]
 RUN ln -s /busybox/sh /bin/sh
 
-COPY driver-manager /usr/bin
 COPY scripts/vfio-manage /usr/bin
-COPY --from=build /work/nvdrain /usr/bin
-COPY --from=build /work/kubectl /usr/bin
+COPY --from=build /work/driver-manager /usr/bin
 
 LABEL io.k8s.display-name="NVIDIA Driver Upgrade Manager for Kubernetes"
 LABEL name="NVIDIA Driver Upgrade Manager for Kubernetes"
