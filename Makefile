@@ -24,7 +24,7 @@ IMAGE_NAME = $(REGISTRY)/k8s-driver-manager
 endif
 
 CHECK_TARGETS := lint
-MAKE_TARGETS := build check fmt lint-internal test $(CHECK_TARGETS)
+MAKE_TARGETS := build check cmds fmt lint-internal test $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS)
 
@@ -32,6 +32,18 @@ DOCKER_TARGETS := $(patsubst %,docker-%, $(TARGETS))
 .PHONY: $(TARGETS) $(DOCKER_TARGETS)
 
 GOOS ?= linux
+
+COMMAND_BUILD_OPTIONS = -o driver-manager
+ifneq ($(shell uname),Darwin)
+# EXTLDFLAGS = -Wl,--export-dynamic -Wl,--unresolved-symbols=ignore-in-object-files
+EXTLDFLAGS = -Wl,-z,lazy
+else
+EXTLDFLAGS = -Wl,-undefined,dynamic_lookup
+endif
+BUILDFLAGS = -ldflags "-s -w '-extldflags=$(EXTLDFLAGS)'"
+
+cmds:
+	go build $(BUILDFLAGS) $(COMMAND_BUILD_OPTIONS) ./cmd/driver-manager/
 
 build:
 	GOOS=$(GOOS) go build ./...
