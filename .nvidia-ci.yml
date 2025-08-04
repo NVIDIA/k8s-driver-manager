@@ -140,7 +140,9 @@ scan-ubi9-arm64:
     OUT_REGISTRY_USER: "${NGC_REGISTRY_USER}"
     OUT_REGISTRY_TOKEN: "${NGC_REGISTRY_TOKEN}"
     OUT_REGISTRY: "${NGC_REGISTRY}"
-    OUT_IMAGE_NAME: "${NGC_REGISTRY_IMAGE}"
+  script:
+    - echo "${CI_COMMIT_SHORT_SHA} ${OUT_IMAGE_VERSION}" > combined-build-info.txt
+
 
 # Define the external release targets
 # Release to NGC
@@ -149,54 +151,19 @@ release:ngc-ubi9:
     - .release:ngc
     - .dist-ubi9
 
-# Define the external image signing steps for NGC
-# Download the ngc cli binary for use in the sign steps
-.ngccli-setup:
-  before_script:
-    - apt-get update && apt-get install -y curl unzip jq
-    - |
-      if [ -z "${NGCCLI_VERSION}" ]; then
-        NGC_VERSION_URL="https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions"
-        # Extract the latest version from the JSON data using jq
-        export NGCCLI_VERSION=$(curl -s $NGC_VERSION_URL | jq -r '.recipe.latestVersionIdStr')
-      fi
-      echo "NGCCLI_VERSION ${NGCCLI_VERSION}"
-    - curl -sSLo ngccli_linux.zip https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/${NGCCLI_VERSION}/files/ngccli_linux.zip
-    - unzip ngccli_linux.zip
-    - chmod u+x ngc-cli/ngc
-
-# .sign forms the base of the deployment jobs which signs images in the CI registry.
-# This is extended with the image name and version to be deployed.
-.sign:ngc:
-  image: ubuntu:latest
-  stage: sign
+raise-publishing-merge-request:
+  stage: ngc-publish
   rules:
     - if: $CI_COMMIT_TAG
+  needs:
+    - job: release:ngc-ubi9
+      artifacts: true
+  image: 
+    name: "${CNT_NGC_PUBLISH_IMAGE}"
+    pull_policy: always
   variables:
-    NGC_CLI_API_KEY: "${NGC_REGISTRY_TOKEN}"
-    IMAGE_NAME: "${NGC_REGISTRY_IMAGE}"
-  retry:
-    max: 2
-  before_script:
-    - !reference [.ngccli-setup, before_script]
-    # We ensure that the IMAGE_NAME and IMAGE_TAG is set
-    - 'echo Image Name: ${IMAGE_NAME} && [[ -n "${IMAGE_NAME}" ]] || exit 1'
-    - 'echo Image Tag: ${IMAGE_TAG} && [[ -n "${IMAGE_TAG}" ]] || exit 1'
+    GITLAB_ACCESS_TOKEN: "${CNT_GITLAB_TOKEN}"
   script:
-    - 'echo "Signing the image ${IMAGE_NAME}:${IMAGE_TAG}"'
-    - ngc-cli/ngc registry image publish --source ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:${IMAGE_TAG} --public --discoverable --allow-guest --sign --org nvidia 
+    - cnt-ngc-publish render --project-name "k8s-driver-manager" --versions-file "combined-build-info.txt" --output k8s-driver-manager.yaml
+    - cnt-ngc-publish merge-request --files "k8s-driver-manager.yaml"
 
-sign:ngc:
-  extends:
-    - .sign:ngc
-  parallel:
-    matrix:
-    - SIGN_JOB_NAME: [""]
-      DIST: ["CI_COMMIT_TAG", "ubi9"]
-  rules:
-    - if: '$DIST == "CI_COMMIT_TAG"'
-      variables:
-        IMAGE_TAG: "${SIGN_JOB_NAME}${CI_COMMIT_TAG}"
-    - when: always
-      variables:
-        IMAGE_TAG: "${SIGN_JOB_NAME}${CI_COMMIT_TAG}"
