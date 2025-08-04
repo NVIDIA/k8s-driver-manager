@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM nvcr.io/nvidia/cuda:12.8.0-base-ubi9 AS build
+FROM nvcr.io/nvidia/cuda:12.9.1-base-ubi9 AS build
 
 WORKDIR /work
 
@@ -41,19 +41,23 @@ ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
 
 RUN GOOS=linux go build -o nvdrain ./cmd/nvdrain
 
-FROM nvcr.io/nvidia/cuda:12.8.0-base-ubi9
-
 ARG TARGETARCH
 
-RUN dnf install -y kmod
-
 # Install K8s client to fetch node resources, cluster version and to perform cleanup of pods for driver unload
-RUN OS_ARCH=${TARGETARCH/x86_64/amd64} && OS_ARCH=${OS_ARCH/aarch64/arm64} && curl -o /usr/bin/kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${OS_ARCH}/kubectl";
-RUN chmod a+x /usr/bin/kubectl
+RUN OS_ARCH=${TARGETARCH/x86_64/amd64} && OS_ARCH=${OS_ARCH/aarch64/arm64} && curl -o ./kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${OS_ARCH}/kubectl";
+RUN chmod a+x ./kubectl
 
-COPY driver-manager /usr/local/bin
-COPY scripts/vfio-manage /usr/local/bin
-COPY --from=build /work/nvdrain /usr/local/bin
+FROM nvcr.io/nvidia/distroless/go:v3.1.11-dev
+
+USER 0:0
+
+SHELL ["/busybox/sh", "-c"]
+RUN ln -s /busybox/sh /bin/sh
+
+COPY driver-manager /usr/bin
+COPY scripts/vfio-manage /usr/bin
+COPY --from=build /work/nvdrain /usr/bin
+COPY --from=build /work/kubectl /usr/bin
 
 LABEL io.k8s.display-name="NVIDIA Driver Upgrade Manager for Kubernetes"
 LABEL name="NVIDIA Driver Upgrade Manager for Kubernetes"
@@ -63,13 +67,6 @@ LABEL release="N/A"
 LABEL summary="Manages upgrade of NVIDIA drivers on kubernetes"
 LABEL description="See summary"
 
-RUN mkdir /licenses && mv /NGC-DL-CONTAINER-LICENSE /licenses/NGC-DL-CONTAINER-LICENSE
-
-# Install / upgrade packages here that are required to resolve CVEs
-ARG CVE_UPDATES
-RUN if [ -n "${CVE_UPDATES}" ]; then \
-        yum update -y ${CVE_UPDATES} && \
-        rm -rf /var/cache/yum/*; \
-    fi
+COPY LICENSE /licenses/
 
 ENTRYPOINT ["driver-manager", "preflight_check"]
