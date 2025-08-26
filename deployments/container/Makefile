@@ -64,6 +64,7 @@ $(BUILD_TARGETS): build-%:
 			--tag $(IMAGE) \
 			--build-arg GOLANG_VERSION="$(GOLANG_VERSION)" \
 			--build-arg VERSION="$(VERSION)" \
+			--build-arg GIT_COMMIT="$(GIT_COMMIT)" \
 			--build-arg CVE_UPDATES="$(CVE_UPDATES)" \
 			--file $(DOCKERFILE) \
 			$(CURDIR)

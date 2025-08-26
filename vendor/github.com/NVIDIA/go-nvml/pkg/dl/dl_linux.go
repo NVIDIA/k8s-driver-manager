@@ -1,4 +1,5 @@
-# Copyright (c) 2021-2022, NVIDIA CORPORATION.  All rights reserved.
+/**
+# Copyright (c) NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,15 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+**/
 
-VERSION ?= v0.8.0
-MODULE := github.com/NVIDIA/k8s-driver-manager
+package dl
 
-vVERSION := v$(VERSION:v%=%)
+// #cgo LDFLAGS: -ldl
+// #include <dlfcn.h>
+// #include <stdlib.h>
+import "C"
 
-GOLANG_VERSION := $(shell ./scripts/golang-version.sh)
-
-BUILDIMAGE_TAG ?= devel-go$(GOLANG_VERSION)
-BUILDIMAGE ?=  $(LIB_NAME):$(BUILDIMAGE_TAG)
-
-GIT_COMMIT ?= $(shell git describe --match="" --dirty --long --always --abbrev=40 2> /dev/null || echo "")
+const (
+	RTLD_DEEPBIND = C.RTLD_DEEPBIND
+)
