@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-VERSION ?= v0.8.0
+VERSION ?= v0.8.1
 MODULE := github.com/NVIDIA/k8s-driver-manager
 
 vVERSION := v$(VERSION:v%=%)
