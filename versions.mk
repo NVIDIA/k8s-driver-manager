@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-VERSION ?= v0.8.0
+VERSION ?= v0.8.1
 MODULE := github.com/NVIDIA/k8s-driver-manager
 
 vVERSION := v$(VERSION:v%=%)
 
-GOLANG_VERSION ?= 1.23.5
+GOLANG_VERSION ?= 1.25.0
 
-BUILDIMAGE_TAG ?= devel-go$(GOLANG_VERSION)
-BUILDIMAGE ?=  ghcr.io/nvidia/k8s-test-infra:$(BUILDIMAGE_TAG)
+BUILDIMAGE_TAG ?= $(GOLANG_VERSION)-bookworm
+BUILDIMAGE ?=  golang:$(BUILDIMAGE_TAG)
