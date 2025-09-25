@@ -16,6 +16,9 @@ FROM nvcr.io/nvidia/cuda:13.0.1-base-ubi9 AS build
 
 WORKDIR /work
 
+ARG GOPROXY=direct
+ENV GOPROXY=$GOPROXY
+
 COPY go.mod go.mod
 COPY go.sum go.sum
 COPY vendor vendor
