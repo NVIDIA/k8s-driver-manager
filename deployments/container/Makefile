@@ -27,6 +27,8 @@ REGISTRY ?= nvidia
 IMAGE_NAME := $(REGISTRY)/k8s-driver-manager
 endif
 
+GOPROXY ?= direct
+
 IMAGE_VERSION := $(VERSION)
 
 IMAGE = $(IMAGE_NAME):$(IMAGE_VERSION)
@@ -66,6 +68,7 @@ $(BUILD_TARGETS): build-%:
 			--build-arg VERSION="$(VERSION)" \
 			--build-arg GIT_COMMIT="$(GIT_COMMIT)" \
 			--build-arg CVE_UPDATES="$(CVE_UPDATES)" \
+			--build-arg GOPROXY="$(GOPROXY)" \
 			--file $(DOCKERFILE) \
 			$(CURDIR)
 
