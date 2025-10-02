@@ -78,6 +78,8 @@ type config struct {
 	gpuDirectRDMAEnabled       bool
 	useHostMofed               bool
 	kubeconfig                 string
+	driverVersion              string
+	forceReinstall             bool
 }
 
 // ComponentState tracks the deployment state of GPU operator components
@@ -209,6 +211,20 @@ func main() {
 			EnvVars:     []string{"KUBECONFIG"},
 			Value:       "",
 		},
+		&cli.StringFlag{
+			Name:        "driver-version",
+			Usage:       "Desired NVIDIA driver version",
+			Destination: &cfg.driverVersion,
+			EnvVars:     []string{"DRIVER_VERSION"},
+			Value:       "",
+		},
+		&cli.BoolFlag{
+			Name:        "force-reinstall",
+			Usage:       "Force driver reinstall regardless of current state",
+			Destination: &cfg.forceReinstall,
+			EnvVars:     []string{"FORCE_REINSTALL"},
+			Value:       false,
+		},
 	}
 
 	app.Commands = []*cli.Command{
@@ -270,6 +286,11 @@ func (dm *DriverManager) uninstallDriver() error {
 		// Wait for pod termination
 		time.Sleep(60 * time.Second)
 		return fmt.Errorf("driver is pre-installed on host")
+	}
+
+	if skip, reason := dm.shouldSkipUninstall(); skip {
+		dm.log.Infof("Skipping driver uninstall: %s", reason)
+		return nil
 	}
 
 	// Fetch current component states
@@ -621,6 +642,68 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 func (dm *DriverManager) isDriverLoaded() bool {
 	_, err := os.Stat("/sys/module/nvidia/refcnt")
 	return err == nil
+}
+
+func (dm *DriverManager) shouldSkipUninstall() (bool, string) {
+	if dm.config.forceReinstall {
+		dm.log.Info("Force reinstall is enabled, skipping driver uninstall")
+		return false, ""
+	}
+
+	if !dm.isDriverLoaded() {
+		return true, "no NVIDIA driver modules detected"
+	}
+
+	if dm.config.driverVersion == "" {
+		return false, ""
+	}
+
+	version, err := dm.detectCurrentDriverVersion()
+	if err != nil {
+		dm.log.Warnf("Unable to determine installed driver version: %v", err)
+		// If driver is loaded but we can't detect version, skip uninstall to avoid disruption
+		return true, "driver is loaded but version cannot be determined - skipping to avoid disruption"
+	}
+
+	if version == dm.config.driverVersion {
+		return true, "desired version already present"
+	}
+
+	dm.log.Infof("Installed driver version %s does not match desired %s", version, dm.config.driverVersion)
+	return false, ""
+}
+
+func (dm *DriverManager) detectCurrentDriverVersion() (string, error) {
+	baseCtx := dm.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	ctx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
+	defer cancel()
+
+	// Try chroot to /run/nvidia/driver for containerized driver
+	cmd := exec.CommandContext(ctx, "chroot", "/run/nvidia/driver", "modinfo", "-F", "version", "nvidia")
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmdOutput, chrootErr := cmd.Output()
+	if chrootErr == nil {
+		version := strings.TrimSpace(string(cmdOutput))
+		if version != "" {
+			dm.log.Infof("Driver version detected via chroot: %s", version)
+			return version, nil
+		}
+	}
+
+	// Second try to read from /sys/module/nvidia/version if available
+	if versionData, err := os.ReadFile("/sys/module/nvidia/version"); err == nil {
+		version := strings.TrimSpace(string(versionData))
+		if version != "" {
+			dm.log.Infof("Driver version detected from /sys/module/nvidia/version: %s", version)
+			return version, nil
+		}
+	}
+
+	return "", fmt.Errorf("all version detection methods failed: chroot: %v", chrootErr)
 }
 
 func (dm *DriverManager) isNouveauLoaded() bool {
