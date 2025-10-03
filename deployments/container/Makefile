@@ -27,7 +27,7 @@ REGISTRY ?= nvidia
 IMAGE_NAME := $(REGISTRY)/k8s-driver-manager
 endif
 
-GOPROXY ?= direct
+GOPROXY ?= https://proxy.golang.org,direct
 
 IMAGE_VERSION := $(VERSION)
 

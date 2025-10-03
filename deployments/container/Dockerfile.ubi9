@@ -16,7 +16,7 @@ FROM nvcr.io/nvidia/cuda:13.0.1-base-ubi9 AS build
 
 WORKDIR /work
 
-ARG GOPROXY=direct
+ARG GOPROXY="https://proxy.golang.org,direct"
 ENV GOPROXY=$GOPROXY
 
 COPY go.mod go.mod
