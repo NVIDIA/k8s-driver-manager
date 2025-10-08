@@ -21,9 +21,6 @@ on:
       version:
         required: true
         type: string
-      build_multi_arch_images:
-        required: true
-        type: string
 
 jobs:
   build-image:
@@ -61,7 +58,7 @@ jobs:
           IMAGE_NAME: ghcr.io/nvidia/k8s-driver-manager
           VERSION: ${{ inputs.version }}
           PUSH_ON_BUILD: "true"
-          BUILD_MULTI_ARCH_IMAGES: ${{ inputs.build_multi_arch_images }}
+          BUILD_MULTI_ARCH_IMAGES: "true"
           GOPROXY: ${{ steps.setup-go-proxy.outputs.goproxy-url }}
         run: |
           echo "${VERSION}"
