@@ -37,7 +37,6 @@ import (
 	"github.com/NVIDIA/k8s-driver-manager/internal/info"
 	kube "github.com/NVIDIA/k8s-driver-manager/internal/kubernetes"
 	"github.com/NVIDIA/k8s-driver-manager/internal/linuxutils"
-	"github.com/NVIDIA/k8s-driver-manager/internal/nvml"
 )
 
 const (
@@ -395,12 +394,14 @@ func (dm *DriverManager) preflightCheck() error {
 
 func (dm *DriverManager) isHostDriver() bool {
 	// Check if driver is pre-installed on the host
-	hostRoot := nvml.DriverRoot("/host")
-	if nvmlLibPath, err := hostRoot.GetNVMLPath(); err == nil {
-		nvmlClient := nvml.NewClient(nvmlLibPath, dm.log)
-		if err := nvmlClient.ValidateDriver(); err == nil {
-			return true
-		}
+	cmd := exec.Command("chroot", "/host", "nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	if len(out) > 0 {
+		dm.log.Infof("Host driver detected: %s", out)
+		return true
 	}
 	return false
 }
