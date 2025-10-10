@@ -571,7 +571,8 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 			"app": selector.app,
 		}
 		if err := dm.kubeClient.WaitForPodTermination(selectorMap, namespace, nodeName, selector.timeout); err != nil {
-			dm.log.Warnf("Failed to wait for %s to shutdown: %v", selector.app, err)
+			dm.log.Errorf("Failed to wait for %s to shutdown: %v", selector.app, err)
+			return err
 		}
 	}
 
@@ -582,7 +583,8 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 			"app": "nvidia-mig-manager",
 		}
 		if err := dm.kubeClient.WaitForPodTermination(selectorMap, namespace, nodeName, defaultGracePeriod); err != nil {
-			dm.log.Warn("Failed to wait for mig-manager to shutdown")
+			dm.log.Errorf("Failed to wait for mig-manager to shutdown: %v", err)
+			return err
 		}
 	}
 
@@ -592,7 +594,8 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 			"app": "nvidia-sandbox-validator",
 		}
 		if err := dm.kubeClient.WaitForPodTermination(selectorMap, namespace, nodeName, defaultGracePeriod); err != nil {
-			dm.log.Warn("Failed to wait for sandbox-validator to shutdown")
+			dm.log.Errorf("Failed to wait for sandbox-validator to shutdown: %v", err)
+			return err
 		}
 	}
 
@@ -602,7 +605,8 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 			"app": "nvidia-sandbox-device-plugin-daemonset",
 		}
 		if err := dm.kubeClient.WaitForPodTermination(selectorMap, namespace, nodeName, defaultGracePeriod); err != nil {
-			dm.log.Warn("Failed to wait for sandbox-device-plugin to shutdown")
+			dm.log.Errorf("Failed to wait for sandbox-device-plugin to shutdown: %v", err)
+			return err
 		}
 	}
 
@@ -612,7 +616,8 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 			"app": "nvidia-vgpu-device-manager",
 		}
 		if err := dm.kubeClient.WaitForPodTermination(selectorMap, namespace, nodeName, defaultGracePeriod); err != nil {
-			dm.log.Warn("Failed to wait for vgpu-device-manager to shutdown")
+			dm.log.Errorf("Failed to wait for vgpu-device-manager to shutdown: %v", err)
+			return err
 		}
 	}
 
