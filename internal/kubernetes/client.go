@@ -38,6 +38,9 @@ const (
 	nvidiaDomainPrefix       = "nvidia.com"
 	nvidiaResourceNamePrefix = nvidiaDomainPrefix + "/" + "gpu"
 	nvidiaMigResourcePrefix  = nvidiaDomainPrefix + "/" + "mig-"
+
+	nodeOperationCordon   = "cordon"
+	nodeOperationUncordon = "uncordon"
 )
 
 // Client represents a Kubernetes client wrapper use to perform all the Kubernetes operations required by k8s-driver-manager
@@ -129,42 +132,39 @@ func (c *Client) GetNodeAnnotationValue(nodeName, annotation string) (string, er
 // CordonNode cordons a Node given a Node name marking it as Unschedulable
 func (c *Client) CordonNode(nodeName string) error {
 	c.log.Infof("Cordoning node %s", nodeName)
-
-	// Get the node
-	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	// Set the unschedulable flag
-	node.Spec.Unschedulable = true
-
-	// Update the node
-	_, err = c.clientset.CoreV1().Nodes().Update(c.ctx, node, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to cordon node %s: %w", nodeName, err)
-	}
-
-	return nil
+	return c.cordonOrUncordon(nodeName, nodeOperationCordon)
 }
 
 // UncordonNode uncordons a Node given a Node name marking it as Schedulable
 func (c *Client) UncordonNode(nodeName string) error {
 	c.log.Infof("Uncordoning node %s", nodeName)
+	return c.cordonOrUncordon(nodeName, nodeOperationUncordon)
+}
 
+func (c *Client) cordonOrUncordon(nodeName string, operation string) error {
 	// Get the node
 	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
 	}
 
-	// Clear the unschedulable flag
-	node.Spec.Unschedulable = false
+	switch operation {
+	case nodeOperationCordon:
+		node.Spec.Unschedulable = true
+	case nodeOperationUncordon:
+		node.Spec.Unschedulable = false
+	default:
+		// this should never get executed
+		panic(fmt.Errorf("unknown operation %q", operation))
+	}
 
-	// Update the node
-	_, err = c.clientset.CoreV1().Nodes().Update(c.ctx, node, metav1.UpdateOptions{})
+	drainHelper := &drain.Helper{
+		Ctx:    c.ctx,
+		Client: c.clientset,
+	}
+	err = drain.RunCordonOrUncordon(drainHelper, node, true)
 	if err != nil {
-		return fmt.Errorf("failed to uncordon node %s: %w", nodeName, err)
+		return fmt.Errorf("failed to perform %s of node %s: %w", operation, nodeName, err)
 	}
 
 	return nil
