@@ -18,6 +18,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -95,25 +97,24 @@ func (c *Client) GetNodeLabelValue(nodeName, label string) (string, error) {
 }
 
 // UpdateNodeLabels updates the labels on a Node given a Node name and a string map of label key-value pairs
+// This method uses a strategic merge patch to avoid conflicts with concurrent updates
 func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string) error {
-	// Get the node
-	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"labels": nodeLabels,
+		},
 	}
 
-	if node.Labels == nil {
-		node.Labels = make(map[string]string)
-	}
-	for k, v := range nodeLabels {
-		node.Labels[k] = v
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
-	// Update the node
-	_, err = c.clientset.CoreV1().Nodes().Update(c.ctx, node, metav1.UpdateOptions{})
+	_, err = c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to update labels of node %s: %w", nodeName, err)
+		return fmt.Errorf("failed to update the labels of node %s: %w", nodeName, err)
 	}
+
 	return nil
 }
 
