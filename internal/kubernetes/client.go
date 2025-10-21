@@ -40,9 +40,6 @@ const (
 	nvidiaDomainPrefix       = "nvidia.com"
 	nvidiaResourceNamePrefix = nvidiaDomainPrefix + "/" + "gpu"
 	nvidiaMigResourcePrefix  = nvidiaDomainPrefix + "/" + "mig-"
-
-	nodeOperationCordon   = "cordon"
-	nodeOperationUncordon = "uncordon"
 )
 
 // Client represents a Kubernetes client wrapper use to perform all the Kubernetes operations required by k8s-driver-manager
@@ -133,42 +130,27 @@ func (c *Client) GetNodeAnnotationValue(nodeName, annotation string) (string, er
 // CordonNode cordons a Node given a Node name marking it as Unschedulable
 func (c *Client) CordonNode(nodeName string) error {
 	c.log.Infof("Cordoning node %s", nodeName)
-	return c.cordonOrUncordon(nodeName, nodeOperationCordon)
-}
 
-// UncordonNode uncordons a Node given a Node name marking it as Schedulable
-func (c *Client) UncordonNode(nodeName string) error {
-	c.log.Infof("Uncordoning node %s", nodeName)
-	return c.cordonOrUncordon(nodeName, nodeOperationUncordon)
-}
-
-func (c *Client) cordonOrUncordon(nodeName string, operation string) error {
-	// Get the node
 	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
 	}
 
-	switch operation {
-	case nodeOperationCordon:
-		node.Spec.Unschedulable = true
-	case nodeOperationUncordon:
-		node.Spec.Unschedulable = false
-	default:
-		// this should never get executed
-		panic(fmt.Errorf("unknown operation %q", operation))
-	}
+	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
+	return drain.RunCordonOrUncordon(drainHelper, node, true)
+}
 
-	drainHelper := &drain.Helper{
-		Ctx:    c.ctx,
-		Client: c.clientset,
-	}
-	err = drain.RunCordonOrUncordon(drainHelper, node, true)
+// UncordonNode uncordons a Node given a Node name marking it as Schedulable
+func (c *Client) UncordonNode(nodeName string) error {
+	c.log.Infof("Uncordoning node %s", nodeName)
+
+	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to perform %s of node %s: %w", operation, nodeName, err)
+		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
 	}
 
-	return nil
+	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
+	return drain.RunCordonOrUncordon(drainHelper, node, false)
 }
 
 // WaitForPodTermination will wait for the termination of pods matching labels from the selectorMap on the node with the specified namespace.
