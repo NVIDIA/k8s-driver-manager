@@ -361,7 +361,7 @@ func (dm *DriverManager) uninstallDriver() error {
 	// Cleanup and reschedule components
 	if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
 		if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
-			dm.log.Warn("Failed to uncordon node")
+			dm.log.Warnf("Failed to uncordon node: %v", err)
 		}
 	}
 
@@ -866,11 +866,11 @@ func (dm *DriverManager) cleanupOnFailure() {
 
 	if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
 		if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
-			dm.log.Warn("Failed to uncordon node during cleanup")
+			dm.log.Warnf("Failed to uncordon node during cleanup: %v", err)
 		}
 	}
 
 	if err := dm.rescheduleGPUOperatorComponents(); err != nil {
-		dm.log.Warn("Failed to reschedule GPU operator components during cleanup")
+		dm.log.Warnf("Failed to reschedule GPU operator components during cleanup: %v", err)
 	}
 }
