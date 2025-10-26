@@ -93,6 +93,57 @@ func (c *Client) GetNodeLabelValue(nodeName, label string) (string, error) {
 	return node.Labels[label], nil
 }
 
+// GetNodeLabels returns all the labels for a given node
+func (c *Client) GetAllNodeLabels(nodeName string) (map[string]string, error) {
+	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+	return node.Labels, nil
+}
+
+// GetNode returns a Node given a Node name
+func (c *Client) GetNode(nodeName string) (*corev1.Node, error) {
+	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+	return node, nil
+}
+
+// UpdateNode updates a Node given a Node name and a Node object
+func (c *Client) UpdateNode(node *corev1.Node) error {
+	_, err := c.clientset.CoreV1().Nodes().Update(c.ctx, node, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update node %s: %w", node.Name, err)
+	}
+	return nil
+}
+
+func escapeJSONPointer(s string) string {
+	s = strings.ReplaceAll(s, "~", "~0")
+	s = strings.ReplaceAll(s, "/", "~1")
+	return s
+}
+
+func (c *Client) RemoveNodeLabel(nodeName, labelKey string) error {
+	// JSON Patch operation to remove a specific label key
+	patch := []map[string]string{
+		{
+			"op":   "remove",
+			"path": fmt.Sprintf("/metadata/labels/%s", escapeJSONPointer(labelKey)),
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("failed to marshal patch: %w", err)
+	}
+
+	_, err = c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
+	return err
+}
+
 // UpdateNodeLabels updates the labels on a Node given a Node name and a string map of label key-value pairs
 // This method uses a strategic merge patch to avoid conflicts with concurrent updates
 func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string) error {
@@ -169,6 +220,23 @@ func (c *Client) WaitForPodTermination(selectorMap map[string]string, namespace,
 
 		// Return true if no pods are found (all terminated)
 		return len(pods.Items) == 0, nil
+	})
+}
+
+// WaitForNvidiaLabelsRemoval will wait for the removal of all the nvidia labels from the node
+func (c *Client) WaitForNvidiaLabelsRemoval(nodeName string, nvidiaDomainPrefix string, timeout time.Duration) error {
+
+	return wait.PollUntilContextTimeout(c.ctx, 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		labels, err := c.GetAllNodeLabels(nodeName)
+		if err != nil {
+			return false, fmt.Errorf("failed to get all node labels: %w", err)
+		}
+		for key := range labels {
+			if strings.HasPrefix(key, nvidiaDomainPrefix) {
+				return false, fmt.Errorf("nvidia label %s still present on the node", key)
+			}
+		}
+		return true, nil
 	})
 }
 

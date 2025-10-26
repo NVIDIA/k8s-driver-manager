@@ -33,6 +33,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/NVIDIA/k8s-driver-manager/internal/info"
 	kube "github.com/NVIDIA/k8s-driver-manager/internal/kubernetes"
@@ -61,7 +62,26 @@ const (
 	nvidiaSandboxValidatorDeployLabel    = nvidiaDomainPrefix + "/" + "gpu.deploy.sandbox-validator"
 	nvidiaSandboxDevicePluginDeployLabel = nvidiaDomainPrefix + "/" + "gpu.deploy.sandbox-device-plugin"
 	nvidiaVGPUDeviceManagerDeployLabel   = nvidiaDomainPrefix + "/" + "gpu.deploy.vgpu-device-manager"
+
+	// gpuWorkloadConfigContainer = "container"
 )
+
+// var gpuStateLabels = map[string]map[string]string{
+// 	gpuWorkloadConfigContainer: {
+// 		"nvidia.com/gpu.deploy.driver":                "true",
+// 		"nvidia.com/gpu.deploy.operator-validator":    "true",
+// 		"nvidia.com/gpu.deploy.container-toolkit":     "true",
+// 		"nvidia.com/gpu.deploy.device-plugin":         "true",
+// 		"nvidia.com/gpu.deploy.gpu-feature-discovery": "true",
+// 		"nvidia.com/gpu.deploy.dcgm-exporter":         "true",
+// 		"nvidia.com/gpu.deploy.dcgm":                  "true",
+// 		"nvidia.com/gpu.deploy.mig-manager":           "true",
+// 		"nvidia.com/gpu.deploy.nvsm":                  "true",
+// 		"nvidia.com/gpu.deploy.sandbox-validator":     "true",
+// 		"nvidia.com/gpu.deploy.sandbox-device-plugin": "true",
+// 		"nvidia.com/gpu.deploy.vgpu-device-manager":   "true",
+// 	},
+// }
 
 // Configuration holds all the configuration from environment variables
 type config struct {
@@ -381,6 +401,43 @@ func (dm *DriverManager) uninstallDriver() error {
 	return nil
 }
 
+// get the nvidia labels from the node
+func (dm *DriverManager) getNvidiaLabels(nvidiaDomainPrefix string) (map[string]string, error) {
+	dm.log.Infof("SHIVA======= getting nvidia labels for %s", dm.config.nodeName)
+	labels, err := dm.kubeClient.GetAllNodeLabels(dm.config.nodeName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get nvidia labels: %w", err)
+	}
+	dm.log.Infof("SHIVA======= all labels: %v", labels)
+	for key := range labels {
+		if !strings.HasPrefix(key, nvidiaDomainPrefix) {
+			delete(labels, key)
+		}
+	}
+	dm.log.Infof("SHIVA======= nvidia labels: %v", labels)
+	if len(labels) == 0 {
+		dm.log.Infof("SHIVA======= no nvidia labels found")
+		return nil, nil
+	}
+	return labels, nil
+}
+
+// Get the node
+// delete the label from the node
+// update the node label
+func (dm *DriverManager) removeNvidiaLabels(labels map[string]string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		dm.log.Info("Removing all the nvidia labels from the node")
+		for label := range labels {
+			if err := dm.kubeClient.RemoveNodeLabel(dm.config.nodeName, label); err != nil {
+				dm.log.Errorf("Failed to remove node label %s: %v", label, err)
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (dm *DriverManager) preflightCheck() error {
 	dm.log.Info("Performing preflight checks")
 	// TODO: Add checks for driver package availability for current kernel
@@ -532,7 +589,12 @@ func (dm *DriverManager) evictAllGPUOperatorComponents() error {
 	}
 
 	// Wait for pods to terminate
-	return dm.waitForPodsToTerminate()
+	if err := dm.waitForPodsToTerminate(); err != nil {
+		return err
+	}
+
+	// Wait for all the nvidia labels to be removed from the node
+	return dm.waitForNvidiaLabelsRemoval()
 }
 
 func (dm *DriverManager) maybeSetPaused(currentValue string) string {
@@ -620,6 +682,31 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (dm *DriverManager) waitForNvidiaLabelsRemoval() error {
+	//SHIVA
+	dm.log.Info("Waiting for all the nvidia labels to be removed from the node")
+	// uninstallation is done, remove all the nvidia labels from the node , if any are present
+	// Remove all the nvidia labels from the node
+	dm.log.Info("Removing all the nvidia labels from the node")
+	labels, err := dm.getNvidiaLabels(nvidiaDomainPrefix)
+	dm.log.Infof("SHIVA===Returned from getNvidiaLabels==== nvidia labels: %v", labels)
+	if err != nil {
+		dm.log.Warnf("failed to get nvidia labels: %v", err)
+	} else if len(labels) > 0 {
+		dm.log.Infof("SHIVA======= removing nvidia labels: %v", labels)
+		if err := dm.removeNvidiaLabels(labels); err != nil {
+			dm.log.Warnf("failed to remove nvidia labels: %v", err)
+			// return err
+		}
+	}
+	// if err := dm.kubeClient.WaitForNvidiaLabelsRemoval(dm.config.nodeName, nvidiaDomainPrefix, 30*time.Second); err != nil {
+	// 	dm.log.Errorf("Failed to wait for all the nvidia labels to be removed from the node: %v", err)
+	// 	return err
+	// }
+	dm.log.Info("All the nvidia labels have been removed from the node")
 
 	return nil
 }
