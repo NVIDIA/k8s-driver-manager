@@ -258,6 +258,17 @@ func main() {
 	if err := app.Run(os.Args); err != nil {
 		log.Fatal(err)
 	}
+
+	// Wait for all the nvidia labels to be removed from the node
+	driverManager, err := newDriverManager(context.Background(), cfg, components, log)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := driverManager.uninstallDriver(true); err != nil {
+		log.Errorf("failed to uninstall driver: %v", err)
+		log.Fatal(err)
+	}
+	log.Info("Driver uninstallation completed successfully")
 }
 
 func newDriverManager(ctx context.Context, cfg *config, components *componentState, log *logrus.Logger) (*DriverManager, error) {
@@ -277,7 +288,7 @@ func newDriverManager(ctx context.Context, cfg *config, components *componentSta
 	return driverManager, nil
 }
 
-func (dm *DriverManager) uninstallDriver() error {
+func (dm *DriverManager) uninstallDriver(waitForNvidiaLabelsRemoval bool) error {
 	dm.log.Info("Starting driver uninstallation process")
 
 	// Check if driver is pre-installed on host
@@ -302,7 +313,7 @@ func (dm *DriverManager) uninstallDriver() error {
 	}
 
 	// Always evict all GPU operator components across a driver restart
-	if err := dm.evictAllGPUOperatorComponents(); err != nil {
+	if err := dm.evictAllGPUOperatorComponents(waitForNvidiaLabelsRemoval); err != nil {
 		dm.log.Error("Failed to evict GPU operator components, attempting cleanup")
 		dm.cleanupOnFailure()
 		return fmt.Errorf("failed to evict GPU operator components: %w", err)
@@ -555,7 +566,7 @@ func (dm *DriverManager) fetchAutoUpgradeAnnotation() error {
 	return nil
 }
 
-func (dm *DriverManager) evictAllGPUOperatorComponents() error {
+func (dm *DriverManager) evictAllGPUOperatorComponents(waitForNvidiaLabelsRemoval bool) error {
 	dm.log.Info("Shutting down all GPU clients on the current node by disabling their component-specific nodeSelector labels")
 
 	// Prepare labels to update
@@ -589,12 +600,7 @@ func (dm *DriverManager) evictAllGPUOperatorComponents() error {
 	}
 
 	// Wait for pods to terminate
-	if err := dm.waitForPodsToTerminate(); err != nil {
-		return err
-	}
-
-	// Wait for all the nvidia labels to be removed from the node
-	return dm.waitForNvidiaLabelsRemoval()
+	return dm.waitForPodsToTerminate(waitForNvidiaLabelsRemoval)
 }
 
 func (dm *DriverManager) maybeSetPaused(currentValue string) string {
@@ -611,7 +617,7 @@ func (dm *DriverManager) maybeSetPaused(currentValue string) string {
 	}
 }
 
-func (dm *DriverManager) waitForPodsToTerminate() error {
+func (dm *DriverManager) waitForPodsToTerminate(waitForNvidiaLabelsRemoval bool) error {
 	podSelectors := []struct {
 		app     string
 		timeout time.Duration
@@ -682,6 +688,12 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 			return err
 		}
 	}
+	if waitForNvidiaLabelsRemoval {
+		if err := dm.waitForNvidiaLabelsRemoval(); err != nil {
+			dm.log.Errorf("Failed to wait for all the nvidia labels to be removed from the node: %v", err)
+			return err
+		}
+	}
 	return nil
 }
 
@@ -699,13 +711,9 @@ func (dm *DriverManager) waitForNvidiaLabelsRemoval() error {
 		dm.log.Infof("SHIVA======= removing nvidia labels: %v", labels)
 		if err := dm.removeNvidiaLabels(labels); err != nil {
 			dm.log.Warnf("failed to remove nvidia labels: %v", err)
-			// return err
+			return err
 		}
 	}
-	// if err := dm.kubeClient.WaitForNvidiaLabelsRemoval(dm.config.nodeName, nvidiaDomainPrefix, 30*time.Second); err != nil {
-	// 	dm.log.Errorf("Failed to wait for all the nvidia labels to be removed from the node: %v", err)
-	// 	return err
-	// }
 	dm.log.Info("All the nvidia labels have been removed from the node")
 
 	return nil
