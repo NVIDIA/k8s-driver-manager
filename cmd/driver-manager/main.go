@@ -239,7 +239,7 @@ func main() {
 				if err != nil {
 					return fmt.Errorf("failed to create driver manager: %w", err)
 				}
-				return dm.uninstallDriver()
+				return dm.uninstallDriver(false)
 			},
 		},
 		{
