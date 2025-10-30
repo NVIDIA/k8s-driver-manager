@@ -287,11 +287,6 @@ func (dm *DriverManager) uninstallDriver() error {
 		return fmt.Errorf("driver is pre-installed on host")
 	}
 
-	if skip, reason := dm.shouldSkipUninstall(); skip {
-		dm.log.Infof("Skipping driver uninstall: %s", reason)
-		return nil
-	}
-
 	// Fetch current component states
 	if err := dm.fetchCurrentLabels(); err != nil {
 		return fmt.Errorf("failed to fetch current labels: %w", err)
@@ -307,6 +302,14 @@ func (dm *DriverManager) uninstallDriver() error {
 		dm.log.Error("Failed to evict GPU operator components, attempting cleanup")
 		dm.cleanupOnFailure()
 		return fmt.Errorf("failed to evict GPU operator components: %w", err)
+	}
+
+	if skip, reason := dm.shouldSkipUninstall(); skip {
+		dm.log.Infof("Skipping driver uninstall: %s", reason)
+		if err := dm.rescheduleGPUOperatorComponents(); err != nil {
+			dm.log.Warnf("Failed to reschedule GPU operator components: %v", err)
+		}
+		return nil
 	}
 
 	drainOpts := kube.DrainOptions{
@@ -661,7 +664,7 @@ func (dm *DriverManager) shouldSkipUninstall() (bool, string) {
 	}
 
 	if dm.config.driverVersion == "" {
-		return false, ""
+		return false, "Driver version environment variable is not set"
 	}
 
 	version, err := dm.detectCurrentDriverVersion()
