@@ -24,25 +24,20 @@ on:
 
 jobs:
   build-image:
-    runs-on: linux-amd64-cpu4
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - arm64
+        dist: [distroless]
+    runs-on: linux-${{ matrix.arch }}-cpu4
     permissions:
       contents: read
       id-token: write
       packages: write
-    strategy:
-      matrix:
-        dist: [ubi9]
     steps:
       - uses: actions/checkout@v5
         name: Check out code
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          image: tonistiigi/binfmt:master
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -56,10 +51,32 @@ jobs:
       - name: Build image
         env:
           IMAGE_NAME: ghcr.io/nvidia/k8s-driver-manager
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version }}-${{ matrix.arch }}
           PUSH_ON_BUILD: "true"
-          BUILD_MULTI_ARCH_IMAGES: "true"
           GOPROXY: ${{ steps.setup-go-proxy.outputs.goproxy-url }}
+          DOCKER_BUILD_PLATFORM_OPTIONS: "--platform=linux/${{ matrix.arch }}"
         run: |
           echo "${VERSION}"
           make -f deployments/container/Makefile build-${{ matrix.dist }}
+
+  create-manifest:
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        name: Check out code
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Manifest
+        env:
+          MULTIARCH_IMAGE: ghcr.io/nvidia/k8s-driver-manager:${{ inputs.version }}
+        run: |
+          docker manifest create \
+            ${MULTIARCH_IMAGE} \
+            ghcr.io/nvidia/k8s-driver-manager:${{ inputs.version }}-amd64 \
+            ghcr.io/nvidia/k8s-driver-manager:${{ inputs.version }}-arm64
+          docker manifest push ${MULTIARCH_IMAGE}
