@@ -19,6 +19,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -40,14 +41,29 @@ import (
 )
 
 const (
-	driverRoot          = "/run/nvidia/driver"
-	driverPIDFile       = "/run/nvidia/nvidia-driver.pid"
-	operatorNamespace   = "gpu-operator"
-	pausedStr           = "paused-for-driver-upgrade"
-	defaultDrainTimeout = time.Second * 0
-	defaultGracePeriod  = 5 * time.Minute
+	driverRoot            = "/run/nvidia/driver"
+	driverPIDFile         = "/run/nvidia/nvidia-driver.pid"
+	driverConfigStateFile = "/run/nvidia/driver-config.state"
+	operatorNamespace     = "gpu-operator"
+	pausedStr             = "paused-for-driver-upgrade"
+	defaultDrainTimeout   = time.Second * 0
+	defaultGracePeriod    = 5 * time.Minute
 
 	nvidiaDomainPrefix = "nvidia.com"
+
+	nvidiaModuleConfigFile        = "/drivers/nvidia.conf"
+	nvidiaUVMModuleConfigFile     = "/drivers/nvidia-uvm.conf"
+	nvidiaModsetModuleConfigFile  = "/drivers/nvidia-modeset.conf"
+	nvidiaPeermemModuleConfigFile = "/drivers/nvidia-peermem.conf"
+)
+
+var (
+	driverConfigFiles = []string{
+		nvidiaModuleConfigFile,
+		nvidiaUVMModuleConfigFile,
+		nvidiaModsetModuleConfigFile,
+		nvidiaPeermemModuleConfigFile,
+	}
 
 	nvidiaDriverDeployLabel              = nvidiaDomainPrefix + "/" + "gpu.deploy.driver"
 	nvidiaOperatorValidatorDeployLabel   = nvidiaDomainPrefix + "/" + "gpu.deploy.operator-validator"
@@ -304,8 +320,20 @@ func (dm *DriverManager) uninstallDriver() error {
 		return fmt.Errorf("failed to evict GPU operator components: %w", err)
 	}
 
-	if skip, reason := dm.shouldSkipUninstall(); skip {
-		dm.log.Infof("Skipping driver uninstall: %s", reason)
+	if dm.shouldSkipUninstall() {
+		dm.log.Info("Fast path activated: desired driver version and configuration already present")
+
+		// Clean up stale artifacts from previous container before rescheduling operands
+		dm.log.Info("Cleaning up stale mounts and state files...")
+
+		// Unmount stale rootfs from previous container
+		if err := dm.unmountRootfs(); err != nil {
+			return fmt.Errorf("failed to unmount stale rootfs: %w", err)
+		}
+
+		// Remove stale PID file from previous container
+		dm.removePIDFile()
+
 		if err := dm.rescheduleGPUOperatorComponents(); err != nil {
 			dm.log.Warnf("Failed to reschedule GPU operator components: %v", err)
 		}
@@ -653,68 +681,113 @@ func (dm *DriverManager) isDriverLoaded() bool {
 	return err == nil
 }
 
-func (dm *DriverManager) shouldSkipUninstall() (bool, string) {
-	if dm.config.forceReinstall {
-		dm.log.Info("Force reinstall is enabled, proceeding with driver uninstall")
-		return false, ""
+// getValueWithOverride extracts a value from config by key, but returns override if non-empty
+func getValueWithOverride(config, key, override string) string {
+	if override != "" {
+		return override
 	}
-
-	if !dm.isDriverLoaded() {
-		return false, ""
+	for _, line := range strings.Split(config, "\n") {
+		if strings.HasPrefix(line, key+"=") {
+			return strings.TrimPrefix(line, key+"=")
+		}
 	}
-
-	if dm.config.driverVersion == "" {
-		return false, "Driver version environment variable is not set"
-	}
-
-	version, err := dm.detectCurrentDriverVersion()
-	if err != nil {
-		dm.log.Warnf("Unable to determine installed driver version: %v", err)
-		// If driver is loaded but we can't detect version, proceed with reinstall to ensure correct version
-		dm.log.Info("Cannot verify driver version, proceeding with reinstall to ensure correct version is installed")
-		return false, ""
-	}
-
-	if version != dm.config.driverVersion {
-		dm.log.Infof("Installed driver version %s does not match desired %s, proceeding with uninstall", version, dm.config.driverVersion)
-		return false, ""
-	}
-
-	dm.log.Infof("Installed driver version %s matches desired version, skipping uninstall", version)
-	return true, "desired version already present"
+	return ""
 }
 
-func (dm *DriverManager) detectCurrentDriverVersion() (string, error) {
-	baseCtx := dm.ctx
-	if baseCtx == nil {
-		baseCtx = context.Background()
+// getKernelVersion returns the current kernel version
+func getKernelVersion() string {
+	var utsname unix.Utsname
+	if err := unix.Uname(&utsname); err != nil {
+		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
-	defer cancel()
+	release := utsname.Release[:]
+	nullIdx := bytes.IndexByte(release, 0)
+	return string(release[:nullIdx])
+}
 
-	// Try chroot to /run/nvidia/driver for containerized driver
-	cmd := exec.CommandContext(ctx, "chroot", "/run/nvidia/driver", "modinfo", "-F", "version", "nvidia")
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
-	cmdOutput, chrootErr := cmd.Output()
-	if chrootErr == nil {
-		version := strings.TrimSpace(string(cmdOutput))
-		if version != "" {
-			dm.log.Infof("Driver version detected via chroot: %s", version)
-			return version, nil
+// buildCurrentConfig constructs the current driver configuration string
+func (dm *DriverManager) buildCurrentConfig(storedConfig string) string {
+	driverVersion := getValueWithOverride(storedConfig, "DRIVER_VERSION", dm.config.driverVersion)
+	kernelVersion := getValueWithOverride(storedConfig, "KERNEL_VERSION", getKernelVersion())
+	kernelModuleType := getValueWithOverride(storedConfig, "KERNEL_MODULE_TYPE", os.Getenv("KERNEL_MODULE_TYPE"))
+	driverTypeEnv := os.Getenv("DRIVER_TYPE")
+	if driverTypeEnv == "" {
+		driverTypeEnv = "passthrough"
+	}
+	driverType := getValueWithOverride(storedConfig, "DRIVER_TYPE", driverTypeEnv)
+
+	// Read module parameters from conf files
+	nvidiaParams := readModuleParams(nvidiaModuleConfigFile)
+	nvidiaUVMParams := readModuleParams(nvidiaUVMModuleConfigFile)
+	nvidiaModeset := readModuleParams(nvidiaModsetModuleConfigFile)
+	nvidiaPeermem := readModuleParams(nvidiaPeermemModuleConfigFile)
+
+	var config strings.Builder
+	config.WriteString(fmt.Sprintf("DRIVER_VERSION=%s\n", driverVersion))
+	config.WriteString(fmt.Sprintf("DRIVER_TYPE=%s\n", driverType))
+	config.WriteString(fmt.Sprintf("KERNEL_VERSION=%s\n", kernelVersion))
+	config.WriteString(fmt.Sprintf("GPU_DIRECT_RDMA_ENABLED=%v\n", dm.config.gpuDirectRDMAEnabled))
+	config.WriteString(fmt.Sprintf("USE_HOST_MOFED=%v\n", dm.config.useHostMofed))
+	config.WriteString(fmt.Sprintf("KERNEL_MODULE_TYPE=%s\n", kernelModuleType))
+	config.WriteString(fmt.Sprintf("NVIDIA_MODULE_PARAMS=%s\n", nvidiaParams))
+	config.WriteString(fmt.Sprintf("NVIDIA_UVM_MODULE_PARAMS=%s\n", nvidiaUVMParams))
+	config.WriteString(fmt.Sprintf("NVIDIA_MODESET_MODULE_PARAMS=%s\n", nvidiaModeset))
+	config.WriteString(fmt.Sprintf("NVIDIA_PEERMEM_MODULE_PARAMS=%s\n", nvidiaPeermem))
+
+	// Append config file contents directly
+	for _, file := range driverConfigFiles {
+		if data, err := os.ReadFile(file); err == nil && len(data) > 0 {
+			config.Write(data)
 		}
 	}
 
-	// Second try to read from /sys/module/nvidia/version if available
-	if versionData, err := os.ReadFile("/sys/module/nvidia/version"); err == nil {
-		version := strings.TrimSpace(string(versionData))
-		if version != "" {
-			dm.log.Infof("Driver version detected from /sys/module/nvidia/version: %s", version)
-			return version, nil
+	return config.String()
+}
+
+// readModuleParams reads a module parameter config file and returns its contents as a single-line space-separated string
+func readModuleParams(filepath string) string {
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return ""
+	}
+	// Convert newlines to spaces to match bash implementation
+	return strings.ReplaceAll(strings.TrimSpace(string(data)), "\n", " ")
+}
+
+// driverModuleBuildNeeded checks if driver modules need to be rebuilt
+func (dm *DriverManager) driverModuleBuildNeeded() bool {
+	storedData, err := os.ReadFile(driverConfigStateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			dm.log.Info("No previous driver configuration found")
+			return true
 		}
+		dm.log.Warnf("Failed to read driver config state file: %v", err)
+		return true
 	}
 
-	return "", fmt.Errorf("all version detection methods failed: chroot: %v", chrootErr)
+	storedConfig := string(storedData)
+	currentConfig := dm.buildCurrentConfig(storedConfig)
+
+	return currentConfig != storedConfig
+}
+
+func (dm *DriverManager) shouldSkipUninstall() bool {
+	if dm.config.forceReinstall {
+		dm.log.Info("Force reinstall is enabled, proceeding with driver uninstall")
+		return false
+	}
+
+	// Only skip uninstall if driver IS loaded AND config matches (fast path optimization)
+	if dm.isDriverLoaded() && !dm.driverModuleBuildNeeded() {
+		dm.log.Info("Driver is loaded with matching config, enabling fast path")
+		return true
+	}
+
+	// Driver not loaded or config changed - proceed with cleanup
+	dm.log.Info("Proceeding with cleanup operations")
+	return false
 }
 
 func (dm *DriverManager) isNouveauLoaded() bool {
@@ -725,6 +798,12 @@ func (dm *DriverManager) isNouveauLoaded() bool {
 func (dm *DriverManager) unloadNouveau() error {
 	dm.log.Info("Unloading nouveau driver")
 	return unix.DeleteModule("nouveau", 0)
+}
+
+func (dm *DriverManager) removePIDFile() {
+	if err := os.Remove(driverPIDFile); err != nil && !os.IsNotExist(err) {
+		dm.log.Warnf("Failed to remove PID file %s: %v", driverPIDFile, err)
+	}
 }
 
 func (dm *DriverManager) cleanupDriver() error {
@@ -740,12 +819,7 @@ func (dm *DriverManager) cleanupDriver() error {
 		return fmt.Errorf("failed to unmount rootfs: %w", err)
 	}
 
-	// Remove PID file
-	if _, err := os.Stat(driverPIDFile); err == nil {
-		if err := os.Remove(driverPIDFile); err != nil {
-			dm.log.Warnf("Failed to remove PID file %s: %v", driverPIDFile, err)
-		}
-	}
+	dm.removePIDFile()
 
 	return nil
 }
