@@ -21,26 +21,22 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
 	"github.com/NVIDIA/k8s-driver-manager/internal/info"
+	"github.com/NVIDIA/k8s-driver-manager/internal/nvpci"
 )
 
-const (
-	sysBusPCIDevices    = "/sys/bus/pci/devices"
-	vfioPCIDriverPath   = "/sys/bus/pci/drivers/vfio-pci"
-	nvidiaVendorID      = "0x10de"
-	gpuClass3D          = "0x030000"
-	gpuClassVGA         = "0x030200"
-	vfioPCIDriverName   = "vfio-pci"
-	consumerPrefix      = "consumer:pci:"
-)
+type flags struct {
+	allDevices bool
+	deviceID   string
+}
 
 func main() {
+	flags := flags{}
+
 	log := logrus.New()
 	log.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
@@ -58,18 +54,23 @@ func main() {
 			Usage: "Bind device(s) to vfio-pci driver",
 			Flags: []cli.Flag{
 				&cli.BoolFlag{
-					Name:    "all",
-					Aliases: []string{"a"},
-					Usage:   "Bind all NVIDIA devices to vfio-pci",
+					Name:        "all",
+					Aliases:     []string{"a"},
+					Destination: &flags.allDevices,
+					Usage:       "Bind all NVIDIA devices to vfio-pci",
 				},
 				&cli.StringFlag{
-					Name:    "device-id",
-					Aliases: []string{"d"},
-					Usage:   "Specific device ID to bind (e.g., 0000:01:00.0)",
+					Name:        "device-id",
+					Aliases:     []string{"d"},
+					Destination: &flags.deviceID,
+					Usage:       "Specific device ID to bind (e.g., 0000:01:00.0)",
 				},
 			},
+			Before: func(c *cli.Context) error {
+				return validateFlags(&flags)
+			},
 			Action: func(c *cli.Context) error {
-				return handleBind(c, log)
+				return handleBind(log, &flags)
 			},
 		},
 		{
@@ -77,18 +78,23 @@ func main() {
 			Usage: "Unbind device(s) from their current driver",
 			Flags: []cli.Flag{
 				&cli.BoolFlag{
-					Name:    "all",
-					Aliases: []string{"a"},
-					Usage:   "Unbind all NVIDIA devices",
+					Name:        "all",
+					Aliases:     []string{"a"},
+					Destination: &flags.allDevices,
+					Usage:       "Unbind all NVIDIA devices",
 				},
 				&cli.StringFlag{
-					Name:    "device-id",
-					Aliases: []string{"d"},
-					Usage:   "Specific device ID to unbind (e.g., 0000:01:00.0)",
+					Name:        "device-id",
+					Aliases:     []string{"d"},
+					Destination: &flags.deviceID,
+					Usage:       "Specific device ID to unbind (e.g., 0000:01:00.0)",
 				},
 			},
+			Before: func(c *cli.Context) error {
+				return validateFlags(&flags)
+			},
 			Action: func(c *cli.Context) error {
-				return handleUnbind(c, log)
+				return handleUnbind(log, &flags)
 			},
 		},
 	}
@@ -98,53 +104,46 @@ func main() {
 	}
 }
 
-func handleBind(c *cli.Context, log *logrus.Logger) error {
-	allDevices := c.Bool("all")
-	deviceID := c.String("device-id")
-
-	if !allDevices && deviceID == "" {
+func validateFlags(flags *flags) error {
+	if !flags.allDevices && flags.deviceID == "" {
 		return fmt.Errorf("either --all or --device-id must be specified")
 	}
 
-	if allDevices && deviceID != "" {
+	if flags.allDevices && flags.deviceID != "" {
 		return fmt.Errorf("cannot specify both --all and --device-id")
 	}
 
-	if deviceID != "" {
-		return bindDevice(deviceID, log)
+	return nil
+}
+
+func handleBind(log *logrus.Logger, flags *flags) error {
+	if flags.deviceID != "" {
+		return bindDevice(flags.deviceID, log)
 	}
 
 	return bindAll(log)
 }
 
-func handleUnbind(c *cli.Context, log *logrus.Logger) error {
-	allDevices := c.Bool("all")
-	deviceID := c.String("device-id")
-
-	if !allDevices && deviceID == "" {
-		return fmt.Errorf("either --all or --device-id must be specified")
-	}
-
-	if allDevices && deviceID != "" {
-		return fmt.Errorf("cannot specify both --all and --device-id")
-	}
-
-	if deviceID != "" {
-		return unbindDevice(deviceID, log)
+func handleUnbind(log *logrus.Logger, flags *flags) error {
+	if flags.deviceID != "" {
+		return unbindDevice(flags.deviceID, log)
 	}
 
 	return unbindAll(log)
 }
 
 func bindAll(log *logrus.Logger) error {
-	devices, err := getNVIDIADevices()
+	nvpciLib := nvpci.New()
+	devices, err := nvpciLib.GetGPUs()
 	if err != nil {
-		return fmt.Errorf("failed to get NVIDIA devices: %w", err)
+		return fmt.Errorf("failed to get NVIDIA GPUs: %w", err)
 	}
 
 	for _, dev := range devices {
-		if err := bindDevice(dev, log); err != nil {
-			log.Warnf("Failed to bind device %s: %v", dev, err)
+		log.Infof("Binding device %s", dev.Address)
+		// (cdesiniotis) ideally this should be replaced by a call to nvdev.BindToVFIODriver()
+		if err := nvpciLib.BindToVFIODriver(dev); err != nil {
+			log.Warnf("Failed to bind device %s: %v", dev.Address, err)
 		}
 	}
 
@@ -152,267 +151,60 @@ func bindAll(log *logrus.Logger) error {
 }
 
 func unbindAll(log *logrus.Logger) error {
-	devices, err := getNVIDIADevices()
+	nvpciLib := nvpci.New()
+	devices, err := nvpciLib.GetGPUs()
 	if err != nil {
-		return fmt.Errorf("failed to get NVIDIA devices: %w", err)
+		return fmt.Errorf("failed to get NVIDIA GPUs: %w", err)
 	}
 
 	for _, dev := range devices {
-		if err := unbindDevice(dev, log); err != nil {
-			log.Warnf("Failed to unbind device %s: %v", dev, err)
+		log.Infof("Unbinding device %s", dev.Address)
+		// (cdesiniotis) ideally this should be replaced by a call to nvdev.UnbindFromDriver()
+		if err := nvpciLib.UnbindFromDriver(dev); err != nil {
+			log.Warnf("Failed to unbind device %s: %v", dev.Address, err)
 		}
+	}
+	return nil
+}
+
+func bindDevice(device string, log *logrus.Logger) error {
+	nvpciLib := nvpci.New()
+	nvdev, err := nvpciLib.GetGPUByPciBusID(device)
+	if err != nil {
+		return fmt.Errorf("failed to get NVIDIA GPU device: %w", err)
+	}
+	if nvdev == nil || !nvdev.IsGPU() {
+		log.Infof("Device %s is not a GPU", device)
+		return nil
+	}
+
+	log.Infof("Binding device %s", device)
+
+	// (cdesiniotis) ideally this should be replaced by a call to nvdev.BindToVFIODriver()
+	if err := nvpciLib.BindToVFIODriver(nvdev); err != nil {
+		return fmt.Errorf("failed to bind device %s to vfio driver: %w", device, err)
 	}
 
 	return nil
 }
 
-func bindDevice(gpu string, log *logrus.Logger) error {
-	if !isNVIDIAGPUDevice(gpu) {
-		log.Infof("Device %s is not a GPU", gpu)
-		return nil
-	}
-
-	// Check if already bound to vfio-pci
-	if isBoundToVFIO(gpu, log) {
-		log.Infof("Device %s already bound to vfio-pci", gpu)
-		return nil
-	}
-
-	// Bind the PCI device
-	if err := bindPCIDevice(gpu, log); err != nil {
-		return err
-	}
-
-	// For graphics mode, bind the auxiliary device as well
-	auxDev, err := getGraphicsAuxDev(gpu)
+func unbindDevice(device string, log *logrus.Logger) error {
+	nvpciLib := nvpci.New()
+	nvdev, err := nvpciLib.GetGPUByPciBusID(device)
 	if err != nil {
-		return fmt.Errorf("failed to get auxiliary device for %s: %w", gpu, err)
+		return fmt.Errorf("failed to get NVIDIA GPU device: %w", err)
+	}
+	if nvdev == nil || !nvdev.IsGPU() {
+		log.Infof("Device %s is not a GPU", device)
+		return nil
 	}
 
-	if auxDev != "" {
-		log.Infof("GPU %s is in graphics mode, aux_dev %s", gpu, auxDev)
-		if err := bindPCIDevice(auxDev, log); err != nil {
-			return fmt.Errorf("failed to bind auxiliary device %s: %w", auxDev, err)
-		}
+	log.Infof("Unbinding device %s", device)
+
+	// (cdesiniotis) ideally this should be replaced by a call to nvdev.UnbindFromDriver()
+	if err := nvpciLib.UnbindFromDriver(nvdev); err != nil {
+		return fmt.Errorf("failed to unbind device %s from driver: %w", device, err)
 	}
 
 	return nil
 }
-
-func unbindDevice(gpu string, log *logrus.Logger) error {
-	if !isNVIDIAGPUDevice(gpu) {
-		return nil
-	}
-
-	log.Infof("Unbinding device %s", gpu)
-	if err := unbindFromDriver(gpu, log); err != nil {
-		return err
-	}
-
-	// For graphics mode, unbind the auxiliary device as well
-	auxDev, err := getGraphicsAuxDev(gpu)
-	if err != nil {
-		return fmt.Errorf("failed to get auxiliary device for %s: %w", gpu, err)
-	}
-
-	if auxDev != "" {
-		log.Infof("GPU %s is in graphics mode, aux_dev %s", gpu, auxDev)
-		if err := unbindFromDriver(auxDev, log); err != nil {
-			return fmt.Errorf("failed to unbind auxiliary device %s: %w", auxDev, err)
-		}
-	}
-
-	return nil
-}
-
-func bindPCIDevice(gpu string, log *logrus.Logger) error {
-	// Unbind from other (non-vfio-pci) drivers first
-	if err := unbindFromOtherDriver(gpu, log); err != nil {
-		return err
-	}
-
-	log.Infof("Binding device %s", gpu)
-
-	// Set driver override
-	driverOverridePath := filepath.Join(sysBusPCIDevices, gpu, "driver_override")
-	if err := os.WriteFile(driverOverridePath, []byte(vfioPCIDriverName), 0644); err != nil {
-		return fmt.Errorf("failed to set driver_override for %s: %w", gpu, err)
-	}
-
-	// Bind to vfio-pci
-	bindPath := filepath.Join(vfioPCIDriverPath, "bind")
-	if err := os.WriteFile(bindPath, []byte(gpu), 0644); err != nil {
-		return fmt.Errorf("failed to bind %s to vfio-pci: %w", gpu, err)
-	}
-
-	return nil
-}
-
-func unbindFromDriver(gpu string, log *logrus.Logger) error {
-	driverPath := filepath.Join(sysBusPCIDevices, gpu, "driver")
-
-	// Check if device is bound to any driver
-	if _, err := os.Stat(driverPath); os.IsNotExist(err) {
-		return nil
-	}
-
-	// Get the driver name
-	driverLink, err := os.Readlink(driverPath)
-	if err != nil {
-		return fmt.Errorf("failed to read driver link for %s: %w", gpu, err)
-	}
-	driverName := filepath.Base(driverLink)
-
-	log.Infof("Unbinding device %s from driver %s", gpu, driverName)
-
-	// Unbind the device
-	unbindPath := filepath.Join(driverPath, "unbind")
-	if err := os.WriteFile(unbindPath, []byte(gpu), 0644); err != nil {
-		return fmt.Errorf("failed to unbind %s from %s: %w", gpu, driverName, err)
-	}
-
-	// Clear driver override
-	driverOverridePath := filepath.Join(sysBusPCIDevices, gpu, "driver_override")
-	if err := os.WriteFile(driverOverridePath, []byte("\n"), 0644); err != nil {
-		return fmt.Errorf("failed to clear driver_override for %s: %w", gpu, err)
-	}
-
-	return nil
-}
-
-func unbindFromOtherDriver(gpu string, log *logrus.Logger) error {
-	driverPath := filepath.Join(sysBusPCIDevices, gpu, "driver")
-
-	// Check if device is bound to any driver
-	if _, err := os.Stat(driverPath); os.IsNotExist(err) {
-		return nil
-	}
-
-	// Get the driver name
-	driverLink, err := os.Readlink(driverPath)
-	if err != nil {
-		return fmt.Errorf("failed to read driver link for %s: %w", gpu, err)
-	}
-	driverName := filepath.Base(driverLink)
-
-	// Return if already bound to vfio-pci
-	if driverName == vfioPCIDriverName {
-		return nil
-	}
-
-	log.Infof("Unbinding device %s from driver %s", gpu, driverName)
-
-	// Unbind the device
-	unbindPath := filepath.Join(driverPath, "unbind")
-	if err := os.WriteFile(unbindPath, []byte(gpu), 0644); err != nil {
-		return fmt.Errorf("failed to unbind %s from %s: %w", gpu, driverName, err)
-	}
-
-	// Clear driver override
-	driverOverridePath := filepath.Join(sysBusPCIDevices, gpu, "driver_override")
-	if err := os.WriteFile(driverOverridePath, []byte("\n"), 0644); err != nil {
-		return fmt.Errorf("failed to clear driver_override for %s: %w", gpu, err)
-	}
-
-	return nil
-}
-
-func isNVIDIAGPUDevice(gpu string) bool {
-	classFile := filepath.Join(sysBusPCIDevices, gpu, "class")
-	data, err := os.ReadFile(classFile)
-	if err != nil {
-		return false
-	}
-
-	class := strings.TrimSpace(string(data))
-	return class == gpuClass3D || class == gpuClassVGA
-}
-
-func isBoundToVFIO(gpu string, log *logrus.Logger) bool {
-	driverPath := filepath.Join(sysBusPCIDevices, gpu, "driver")
-
-	// Check if device is bound to any driver
-	if _, err := os.Stat(driverPath); os.IsNotExist(err) {
-		return false
-	}
-
-	// Get the driver name
-	driverLink, err := os.Readlink(driverPath)
-	if err != nil {
-		return false
-	}
-	driverName := filepath.Base(driverLink)
-
-	log.Infof("Existing driver is %s", driverName)
-
-	return driverName == vfioPCIDriverName
-}
-
-func getGraphicsAuxDev(gpu string) (string, error) {
-	// Check device class
-	classFile := filepath.Join(sysBusPCIDevices, gpu, "class")
-	data, err := os.ReadFile(classFile)
-	if err != nil {
-		return "", err
-	}
-
-	class := strings.TrimSpace(string(data))
-	if class != gpuClass3D {
-		return "", nil
-	}
-
-	// Look for consumer symlink
-	deviceDir := filepath.Join(sysBusPCIDevices, gpu)
-	entries, err := os.ReadDir(deviceDir)
-	if err != nil {
-		return "", err
-	}
-
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "consumer") {
-			// Extract aux device name from consumer:pci:XXXX:XX:XX.X format
-			parts := strings.Split(entry.Name(), consumerPrefix)
-			if len(parts) != 2 {
-				continue
-			}
-
-			auxDev := parts[1]
-			if auxDev == "" {
-				continue
-			}
-
-			// Check if aux device exists
-			auxDevPath := filepath.Join(sysBusPCIDevices, auxDev)
-			if _, err := os.Stat(auxDevPath); err == nil {
-				return auxDev, nil
-			}
-		}
-	}
-
-	return "", nil
-}
-
-func getNVIDIADevices() ([]string, error) {
-	var devices []string
-
-	entries, err := os.ReadDir(sysBusPCIDevices)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read %s: %w", sysBusPCIDevices, err)
-	}
-
-	for _, entry := range entries {
-		vendorFile := filepath.Join(sysBusPCIDevices, entry.Name(), "vendor")
-		data, err := os.ReadFile(vendorFile)
-		if err != nil {
-			continue
-		}
-
-		vendor := strings.TrimSpace(string(data))
-		if vendor == nvidiaVendorID {
-			devices = append(devices, entry.Name())
-		}
-	}
-	return devices, nil
-}
-
-
