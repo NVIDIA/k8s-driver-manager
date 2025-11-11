@@ -40,8 +40,10 @@ type unbindOptions struct {
 // newUnbindCommand constructs an unbind command with the specified logger
 func newUnbindCommand(logger *logrus.Logger) *cli.Command {
 	c := unbindCommand{
-		logger:   logger,
-		nvpciLib: nvpci.New(),
+		logger: logger,
+		nvpciLib: nvpci.New(
+			nvpci.WithLogger(logger),
+		),
 	}
 	return c.build()
 }

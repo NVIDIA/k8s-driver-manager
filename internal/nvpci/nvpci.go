@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -41,6 +42,7 @@ type Interface interface {
 
 type nvpciWrapper struct {
 	nvpci.Interface
+	logger *logrus.Logger
 }
 
 type nvidiaPCIDevice struct {
@@ -53,9 +55,39 @@ type nvidiaPCIAuxDevice struct {
 	Driver  string
 }
 
-func New() Interface {
-	return &nvpciWrapper{
-		Interface: nvpci.New(),
+func New(opts ...Option) Interface {
+	n := &nvpciWrapper{}
+	for _, opt := range opts {
+		opt(n)
+	}
+	if n.logger == nil {
+		n.logger = logrus.New()
+	}
+
+	// (cdesiniotis) Create an identical logger for the underlying nvpci library,
+	// with the exception being the log level. Currently, the nvpci library
+	// logs many warnings when constructing NvidiaPCIDevice's if it cannot
+	// find entries for the pci device / class id in the pci database file.
+	// These warnings are irrelevant when using this wrapper to bind / unbind
+	// an NVIDIA device from kernel drivers.
+	//
+	// https://github.com/NVIDIA/go-nvlib/blob/main/pkg/nvpci/nvpci.go#L344-L353
+	nvpciLogger := logrus.New()
+	nvpciLogger.SetLevel(logrus.ErrorLevel)
+	nvpciLogger.SetFormatter(n.logger.Formatter)
+	nvpciLogger.Out = n.logger.Out
+
+	n.Interface = nvpci.New(nvpci.WithLogger(nvpciLogger))
+	return n
+}
+
+// Option defines a function for passing options to the New() call.
+type Option func(*nvpciWrapper)
+
+// WithLogger provides an Option to set the logger for the library.
+func WithLogger(logger *logrus.Logger) Option {
+	return func(w *nvpciWrapper) {
+		w.logger = logger
 	}
 }
 
@@ -63,60 +95,91 @@ func New() Interface {
 // which removes the need for this wrapper
 func (w *nvpciWrapper) BindToVFIODriver(dev *nvpci.NvidiaPCIDevice) error {
 	nvdev := &nvidiaPCIDevice{dev}
-	return nvdev.bindToVFIODriver()
+	return w.bindToVFIODriver(nvdev)
 }
 
 // (cdesiniotis) ideally this method would be attached to the nvcpi.NvidiaPCIDevice struct
 // which removes the need for this wrapper
 func (w *nvpciWrapper) UnbindFromDriver(dev *nvpci.NvidiaPCIDevice) error {
 	nvdev := &nvidiaPCIDevice{dev}
-	return nvdev.unbindFromDriver()
+	return w.unbindFromDriver(nvdev)
 }
 
-func (d *nvidiaPCIDevice) bindToVFIODriver() error {
-	// TODO: Instead of always binding to vfio-pci, check if a vfio variant module
-	// should be used instead. This is required for GB200 where the nvgrace-gpu-vfio-pci
-	// module must be used instead of vfio-pci.
-	if d.Driver != vfioPCIDriverName {
-		if err := unbind(d.Address); err != nil {
-			return fmt.Errorf("failed to unbind device %s: %w", d.Address, err)
+func (w *nvpciWrapper) bindToVFIODriver(device *nvidiaPCIDevice) error {
+	vfioDriverName, err := w.findBestVFIOVariant(device)
+	if err != nil {
+		return fmt.Errorf("failed to find best vfio variant driver: %w", err)
+	}
+
+	// (cdesiniotis) Module names in the modules.alias file will only ever contain
+	// underscores characters and not dashes -- this aligns with how the linux kernel
+	// stores module names internally. This can sometimes differ from the name of the
+	// directory in /sys/bus/pci/driver/ for a given module. For example, this
+	// contradiction exists for the standard vfio-pci module:
+	//
+	// $ file /sys/bus/pci/drivers/vfio-pci
+	// sys/bus/pci/drivers/vfio-pci: directory
+	//
+	// $ modinfo vfio-pci | grep ^name:
+	// name:           vfio_pci
+	//
+	// To account for this difference, we check if the module name returned by
+	// findBestVFIOVariant() exists in /sys/bus/pci/drivers, and if not, we try
+	// again but with any underscore characters converted to dashes.
+	driverDir := filepath.Join(pciDriversRoot, vfioDriverName)
+	if _, err := os.Stat(driverDir); err != nil {
+		vfioDriverNameNormalized := strings.ReplaceAll(vfioDriverName, "_", "-")
+		driverDir = filepath.Join(pciDriversRoot, vfioDriverNameNormalized)
+		if _, err := os.Stat(driverDir); err != nil {
+			return fmt.Errorf("failed to find directory for vfio driver %s at %s, is the module loaded?", vfioDriverName, pciDriversRoot)
 		}
-		if err := bind(d.Address, vfioPCIDriverName); err != nil {
-			return fmt.Errorf("failed to bind device %s to %s: %w", d.Address, vfioPCIDriverName, err)
+		vfioDriverName = vfioDriverNameNormalized
+	}
+
+	w.logger.Infof("Binding device %s to driver: %s", device.Address, vfioDriverName)
+
+	if device.Driver != vfioDriverName {
+		if err := unbind(device.Address); err != nil {
+			return fmt.Errorf("failed to unbind device %s: %w", device.Address, err)
+		}
+		if err := bind(device.Address, vfioDriverName); err != nil {
+			return fmt.Errorf("failed to bind device %s to %s: %w", device.Address, vfioDriverName, err)
 		}
 	}
 
 	// For graphics mode, bind the auxiliary device as well
-	auxDev, err := d.getGraphicsAuxDev()
+	auxDev, err := device.getGraphicsAuxDev()
 	if err != nil {
-		return fmt.Errorf("failed to get graphics auxiliary device for %s: %w", d.Address, err)
+		return fmt.Errorf("failed to get graphics auxiliary device for %s: %w", device.Address, err)
 	}
 	if auxDev == nil {
 		return nil
 	}
-	if auxDev.Driver == vfioPCIDriverName {
+	if auxDev.Driver == vfioDriverName {
 		return nil
 	}
+
+	w.logger.Infof("Binding graphics auxiliary device %s to driver: %s", auxDev.Address, vfioDriverName)
 
 	if err := unbind(auxDev.Address); err != nil {
 		return fmt.Errorf("failed to unbind graphics auxiliary device %s: %w", auxDev.Address, err)
 	}
-	if err := bind(auxDev.Address, vfioPCIDriverName); err != nil {
-		return fmt.Errorf("failed to bind graphics auxiliary device %s to %s: %w", auxDev.Address, vfioPCIDriverName, err)
+	if err := bind(auxDev.Address, vfioDriverName); err != nil {
+		return fmt.Errorf("failed to bind graphics auxiliary device %s to %s: %w", auxDev, vfioDriverName, err)
 	}
 
 	return nil
 }
 
-func (d *nvidiaPCIDevice) unbindFromDriver() error {
-	if err := unbind(d.Address); err != nil {
-		return fmt.Errorf("failed to unbind device %s: %w", d.Address, err)
+func (w *nvpciWrapper) unbindFromDriver(device *nvidiaPCIDevice) error {
+	if err := unbind(device.Address); err != nil {
+		return fmt.Errorf("failed to unbind device %s: %w", device.Address, err)
 	}
 
 	// For graphics mode, unbind the auxiliary device as well
-	auxDev, err := d.getGraphicsAuxDev()
+	auxDev, err := device.getGraphicsAuxDev()
 	if err != nil {
-		return fmt.Errorf("failed to get graphics auxiliary device for %s: %w", d.Address, err)
+		return fmt.Errorf("failed to get graphics auxiliary device for %s: %w", device.Address, err)
 	}
 	if auxDev != nil {
 		if err := unbind(auxDev.Address); err != nil {
@@ -217,4 +280,56 @@ func unbind(device string) error {
 	}
 
 	return nil
+}
+
+// Find the "best" match of all vfio_pci aliases for device in the host
+// modules.alias file. This uses the algorithm of finding every
+// modules.alias line that begins with "alias vfio_pci:", then picking the
+// one that matches the device's own modalias value (from the file of
+// that name in the device's sysfs directory) with the fewest
+// "wildcards" (* character, meaning "match any value for this
+// attribute").
+//
+// (cdesiniotis) this code is inspired by:
+// https://gitlab.com/libvirt/libvirt/-/commit/82e2fac297105f554f57fb589002933231b4f711
+func (w *nvpciWrapper) findBestVFIOVariant(device *nvidiaPCIDevice) (string, error) {
+	modAliasPath := filepath.Join(device.Path, "modalias")
+	modAliasContent, err := os.ReadFile(modAliasPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read modalias file for %s: %w", device.Address, err)
+	}
+
+	modAliasStr := strings.TrimSpace(string(modAliasContent))
+	modAlias, err := parseModAliasString(modAliasStr)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse modalias string %q for device %q: %w", modAliasStr, device.Address, err)
+	}
+
+	kernelVersion, err := getKernelVersion()
+	if err != nil {
+		return "", fmt.Errorf("failed to get kernel version: %w", err)
+	}
+
+	modulesAliasFilePath := filepath.Join("/lib/modules", kernelVersion, "modules.alias")
+	modulesAliasContent, err := os.ReadFile(modulesAliasFilePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file %s: %w", modulesAliasFilePath, err)
+	}
+
+	// Get all vfio aliases from the modules.alias file
+	// (all lines starting with 'alias vfio_pci:')
+	vfioAliases := getVFIOAliases(string(modulesAliasContent))
+	if len(vfioAliases) == 0 {
+		w.logger.Debugf("No vfio_pci entries found in modules.alias file, falling back to default vfio-pci driver")
+		return vfioPCIDriverName, nil
+	}
+
+	// Find the best matching VFIO driver for this device
+	bestMatch := findBestMatch(modAlias, vfioAliases)
+	if bestMatch == "" {
+		w.logger.Debugf("No matching vfio driver found for device %s in modules.alias file, falling back to default vfio-pci driver", device.Address)
+		return vfioPCIDriverName, nil
+	}
+
+	return bestMatch, nil
 }
