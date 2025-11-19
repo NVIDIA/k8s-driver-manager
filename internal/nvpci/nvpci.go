@@ -33,6 +33,12 @@ const (
 	consumerPrefix    = "consumer:pci:"
 )
 
+type Interface interface {
+	nvpci.Interface
+	BindToVFIODriver(*nvpci.NvidiaPCIDevice) error
+	UnbindFromDriver(*nvpci.NvidiaPCIDevice) error
+}
+
 type nvpciWrapper struct {
 	nvpci.Interface
 }
@@ -47,7 +53,7 @@ type nvidiaPCIAuxDevice struct {
 	Driver  string
 }
 
-func New() *nvpciWrapper {
+func New() Interface {
 	return &nvpciWrapper{
 		Interface: nvpci.New(),
 	}
