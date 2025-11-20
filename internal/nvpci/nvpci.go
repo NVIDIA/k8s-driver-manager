@@ -128,7 +128,7 @@ func (d *nvidiaPCIDevice) unbindFromDriver() error {
 }
 
 func (d *nvidiaPCIDevice) getGraphicsAuxDev() (*nvidiaPCIAuxDevice, error) {
-	if d.Class != nvpci.PCI3dControllerClass {
+	if d.Class != nvpci.PCIVgaControllerClass {
 		return nil, nil
 	}
 
