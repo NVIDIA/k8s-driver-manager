@@ -23,6 +23,7 @@ COPY go.mod go.mod
 COPY go.sum go.sum
 COPY vendor vendor
 COPY cmd/driver-manager cmd/driver-manager
+COPY cmd/vfio-manage cmd/vfio-manage
 COPY internal/ internal/
 
 RUN dnf install -y wget make git gcc
@@ -49,6 +50,8 @@ ARG GIT_COMMIT="unknown"
 ARG VERSION_PKG="github.com/NVIDIA/k8s-driver-manager/internal/info"
 RUN go build -ldflags "-extldflags=-Wl,-z,lazy -s -w -X ${VERSION_PKG}.gitCommit=${GIT_COMMIT} -X ${VERSION_PKG}.version=${VERSION}" \
        -o driver-manager ./cmd/driver-manager/
+RUN go build -ldflags "-extldflags=-Wl,-z,lazy -s -w -X ${VERSION_PKG}.gitCommit=${GIT_COMMIT} -X ${VERSION_PKG}.version=${VERSION}" \
+       -o vfio-manage ./cmd/vfio-manage/
 
 ARG TARGETARCH
 
@@ -59,7 +62,7 @@ USER 0:0
 SHELL ["/busybox/sh", "-c"]
 RUN ln -s /busybox/sh /bin/sh
 
-COPY scripts/vfio-manage /usr/bin
+COPY --from=build /work/vfio-manage /usr/bin
 COPY --from=build /work/driver-manager /usr/bin
 
 LABEL io.k8s.display-name="NVIDIA Driver Upgrade Manager for Kubernetes"
