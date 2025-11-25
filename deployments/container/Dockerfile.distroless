@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM nvcr.io/nvidia/cuda:13.0.1-base-ubi9 AS build
+FROM nvcr.io/nvidia/cuda:13.0.2-base-ubi9 AS build
 
 WORKDIR /work
 
@@ -52,7 +52,7 @@ RUN go build -ldflags "-extldflags=-Wl,-z,lazy -s -w -X ${VERSION_PKG}.gitCommit
 
 ARG TARGETARCH
 
-FROM nvcr.io/nvidia/distroless/cc:v3.1.13-dev
+FROM nvcr.io/nvidia/distroless/cc:v3.2.1-dev
 
 USER 0:0
 
