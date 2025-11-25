@@ -40,8 +40,10 @@ type bindOptions struct {
 // newBindCommand constructs a bind command with the specified logger
 func newBindCommand(logger *logrus.Logger) *cli.Command {
 	c := bindCommand{
-		logger:   logger,
-		nvpciLib: nvpci.New(),
+		logger: logger,
+		nvpciLib: nvpci.New(
+			nvpci.WithLogger(logger),
+		),
 	}
 	return c.build()
 }
