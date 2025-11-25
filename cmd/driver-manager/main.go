@@ -758,17 +758,17 @@ func (dm *DriverManager) waitForMofedDriver() error {
 	var isMofedLoaded func() bool
 	if dm.config.useHostMofed {
 		isMofedLoaded = func() bool {
-			_, err := os.Stat("/run/mellanox/drivers/.driver-ready")
-			return err == nil
-		}
-	} else {
-		isMofedLoaded = func() bool {
 			loadedModules, err := os.ReadFile("/proc/modules")
 			if err != nil {
 				dm.log.Warnf("Failed to read /proc/modules: %v", err)
 				return false
 			}
 			return strings.Contains(string(loadedModules), "mlx5_core")
+		}
+	} else {
+		isMofedLoaded = func() bool {
+			_, err := os.Stat("/run/mellanox/drivers/.driver-ready")
+			return err == nil
 		}
 	}
 
