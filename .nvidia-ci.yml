@@ -65,10 +65,10 @@ variables:
     - regctl registry login "${OUT_REGISTRY}" -u "${OUT_REGISTRY_USER}" -p "${OUT_REGISTRY_TOKEN}"
     - make -f deployments/container/Makefile IMAGE=${IN_REGISTRY}/${IN_IMAGE_NAME}:${IN_VERSION} OUT_IMAGE=${OUT_IMAGE_NAME}:${CI_COMMIT_SHORT_SHA} push-${DIST}
 
-image-ubi9:
+image-distroless:
   extends:
     - .image-pull
-    - .dist-ubi9
+    - .dist-distroless
 
 # We skip the integration tests for the internal CI:
 .integration:
@@ -110,28 +110,28 @@ image-ubi9:
       - vulns.json
       - policy_evaluation.json
 
-# The .scan-ubi9 steps forms the base for all ubi9 image scans across supported architectures
-.scan-ubi9:
+# The .scan-distroless steps forms the base for all distroless image scans across supported architectures
+.scan-distroless:
   extends:
     - .scan
-    - .dist-ubi9
+    - .dist-distroless
   needs:
-    - image-ubi9
+    - image-distroless
 
 # Define the scan targets
-scan-ubi9-amd64:
+scan-distroless-amd64:
   extends:
-    - .scan-ubi9
+    - .scan-distroless
     - .platform-amd64
 
-scan-ubi9-arm64:
+scan-distroless-arm64:
   extends:
-    - .scan-ubi9
+    - .scan-distroless
     - .platform-arm64
   # For now, run the scans sequentially to avoid any issues
   # when pulling the same tag, but different arch, on the gitlab runner
   needs:
-    - scan-ubi9-amd64
+    - scan-distroless-amd64
 
 .ngc-publish-variables:
   before_script:
@@ -145,7 +145,7 @@ scan-ubi9-arm64:
 .update-nspect:
   stage: ngc-publish
   needs:
-    - job: release:staging-ubi9
+    - job: release:staging-distroless
   extends:
     - .ngc-publish-variables
   image: 
