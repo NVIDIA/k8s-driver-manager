@@ -25,6 +25,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const (
+	vfioPciAliasPrefix string = "alias vfio_pci:"
+)
+
 // modAlias is a decomposed version of string like this
 //
 // vNNNNNNNNdNNNNNNNNsvNNNNNNNNsdNNNNNNNNbcNNscNNiNN
@@ -32,13 +36,13 @@ import (
 // The "NNNN" are always of the length in the example
 // unless replaced with a wildcard ("*")
 type modAlias struct {
-	vendor     string // v
-	device     string // d
-	subvendor  string // sv
-	subdevice  string // sd
-	baseClass  string // bc
-	subClass   string // sc
-	interface_ string // i
+	vendor               string // v
+	device               string // d
+	subvendor            string // sv
+	subdevice            string // sd
+	baseClass            string // bc
+	subClass             string // sc
+	programmingInterface string // i
 }
 
 // vfioAlias represents an entry from the modules.alias file for a vfio driver
@@ -66,61 +70,48 @@ func parseModAliasString(input string) (*modAlias, error) {
 	}
 
 	ma := &modAlias{}
-	remaining := input[1:] // skip 'v'
+	var before, after string
+	var found bool
+	after = input[1:] // cut leading 'v'
 
-	vendor, remaining, err := extractField(remaining, "d")
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse vendor: %w", err)
+	before, after, found = strings.Cut(after, "d")
+	if !found {
+		return nil, fmt.Errorf("failed to find delimiter 'd' in %q", input)
 	}
-	ma.vendor = vendor
+	ma.vendor = before
 
-	device, remaining, err := extractField(remaining, "sv")
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse device: %w", err)
+	before, after, found = strings.Cut(after, "sv")
+	if !found {
+		return nil, fmt.Errorf("failed to find delimiter 'sv' in %q", input)
 	}
-	ma.device = device
+	ma.device = before
 
-	subvendor, remaining, err := extractField(remaining, "sd")
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse subvendor: %w", err)
+	before, after, found = strings.Cut(after, "sd")
+	if !found {
+		return nil, fmt.Errorf("failed to find delimiter 'sd' in %q", input)
 	}
-	ma.subvendor = subvendor
+	ma.subvendor = before
 
-	subdevice, remaining, err := extractField(remaining, "bc")
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse subdevice: %w", err)
+	before, after, found = strings.Cut(after, "bc")
+	if !found {
+		return nil, fmt.Errorf("failed to find delimiter 'bc' in %q", input)
 	}
-	ma.subdevice = subdevice
+	ma.subdevice = before
 
-	baseClass, remaining, err := extractField(remaining, "sc")
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse base class: %w", err)
+	before, after, found = strings.Cut(after, "sc")
+	if !found {
+		return nil, fmt.Errorf("failed to find delimiter 'sc' in input %q", input)
 	}
-	ma.baseClass = baseClass
+	ma.baseClass = before
 
-	subClass, remaining, err := extractField(remaining, "i")
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse subclass: %w", err)
+	before, after, found = strings.Cut(after, "i")
+	if !found {
+		return nil, fmt.Errorf("failed to find delimiter 'i' in %q", input)
 	}
-	ma.subClass = subClass
-
-	ma.interface_ = remaining
+	ma.subClass = before
+	ma.programmingInterface = after
 
 	return ma, nil
-}
-
-// extractField extracts the value before the next delimiter from the input string.
-// Returns the extracted value, the remaining string (without the delimiter), and any error.
-func extractField(input, delimiter string) (string, string, error) {
-	idx := strings.Index(input, delimiter)
-	if idx == -1 {
-		return "", "", fmt.Errorf("failed to find index of the first instance of %q in string %q", delimiter, input)
-	}
-
-	value := input[:idx]
-	remaining := input[idx+len(delimiter):]
-
-	return value, remaining, nil
 }
 
 func getKernelVersion() (string, error) {
@@ -154,7 +145,7 @@ func getVFIOAliases(input string) []vfioAlias {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
-		if !strings.HasPrefix(line, "alias vfio_pci:") {
+		if !strings.HasPrefix(line, vfioPciAliasPrefix) {
 			continue
 		}
 

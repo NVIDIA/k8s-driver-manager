@@ -32,6 +32,7 @@ const (
 	pciDriversRoot    = pciRootDir + "drivers"
 	vfioPCIDriverName = "vfio-pci"
 	consumerPrefix    = "consumer:pci:"
+	libModulesRoot    = "/lib/modules/"
 )
 
 type Interface interface {
@@ -310,7 +311,7 @@ func (w *nvpciWrapper) findBestVFIOVariant(device *nvidiaPCIDevice) (string, err
 		return "", fmt.Errorf("failed to get kernel version: %w", err)
 	}
 
-	modulesAliasFilePath := filepath.Join("/lib/modules", kernelVersion, "modules.alias")
+	modulesAliasFilePath := filepath.Join(libModulesRoot, kernelVersion, "modules.alias")
 	modulesAliasContent, err := os.ReadFile(modulesAliasFilePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file %s: %w", modulesAliasFilePath, err)
