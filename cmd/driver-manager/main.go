@@ -19,7 +19,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -43,7 +42,7 @@ import (
 const (
 	driverRoot            = "/run/nvidia/driver"
 	driverPIDFile         = "/run/nvidia/nvidia-driver.pid"
-	driverConfigStateFile = "/run/nvidia/driver-config.state"
+	driverConfigStateFile = "/run/nvidia/nvidia-driver.state"
 	operatorNamespace     = "gpu-operator"
 	pausedStr             = "paused-for-driver-upgrade"
 	defaultDrainTimeout   = time.Second * 0
@@ -51,20 +50,13 @@ const (
 
 	nvidiaDomainPrefix = "nvidia.com"
 
-	nvidiaModuleConfigFile        = "/drivers/nvidia.conf"
-	nvidiaUVMModuleConfigFile     = "/drivers/nvidia-uvm.conf"
-	nvidiaModsetModuleConfigFile  = "/drivers/nvidia-modeset.conf"
-	nvidiaPeermemModuleConfigFile = "/drivers/nvidia-peermem.conf"
+	nvidiaModuleConfigFile        = driverRoot + "/drivers/nvidia.conf"
+	nvidiaUVMModuleConfigFile     = driverRoot + "/drivers/nvidia-uvm.conf"
+	nvidiaModesetModuleConfigFile = driverRoot + "/drivers/nvidia-modeset.conf"
+	nvidiaPeermemModuleConfigFile = driverRoot + "/drivers/nvidia-peermem.conf"
 )
 
 var (
-	driverConfigFiles = []string{
-		nvidiaModuleConfigFile,
-		nvidiaUVMModuleConfigFile,
-		nvidiaModsetModuleConfigFile,
-		nvidiaPeermemModuleConfigFile,
-	}
-
 	nvidiaDriverDeployLabel              = nvidiaDomainPrefix + "/" + "gpu.deploy.driver"
 	nvidiaOperatorValidatorDeployLabel   = nvidiaDomainPrefix + "/" + "gpu.deploy.operator-validator"
 	nvidiaContainerToolkitDeployLabel    = nvidiaDomainPrefix + "/" + "gpu.deploy.container-toolkit"
@@ -681,19 +673,6 @@ func (dm *DriverManager) isDriverLoaded() bool {
 	return err == nil
 }
 
-// getValueWithOverride extracts a value from config by key, but returns override if non-empty
-func getValueWithOverride(config, key, override string) string {
-	if override != "" {
-		return override
-	}
-	for _, line := range strings.Split(config, "\n") {
-		if strings.HasPrefix(line, key+"=") {
-			return strings.TrimPrefix(line, key+"=")
-		}
-	}
-	return ""
-}
-
 // getKernelVersion returns the current kernel version
 func getKernelVersion() string {
 	var utsname unix.Utsname
@@ -701,48 +680,45 @@ func getKernelVersion() string {
 		return ""
 	}
 
-	release := utsname.Release[:]
-	nullIdx := bytes.IndexByte(release, 0)
-	return string(release[:nullIdx])
+	return strings.Trim(string(utsname.Release[:]), " \r\n\t\u0000\uffff")
 }
 
 // buildCurrentConfig constructs the current driver configuration string
-func (dm *DriverManager) buildCurrentConfig(storedConfig string) string {
-	driverVersion := getValueWithOverride(storedConfig, "DRIVER_VERSION", dm.config.driverVersion)
-	kernelVersion := getValueWithOverride(storedConfig, "KERNEL_VERSION", getKernelVersion())
-	kernelModuleType := getValueWithOverride(storedConfig, "KERNEL_MODULE_TYPE", os.Getenv("KERNEL_MODULE_TYPE"))
-	driverTypeEnv := os.Getenv("DRIVER_TYPE")
-	if driverTypeEnv == "" {
-		driverTypeEnv = "passthrough"
+func (dm *DriverManager) buildCurrentConfig() string {
+	driverType := os.Getenv("DRIVER_TYPE")
+	if driverType == "" {
+		driverType = "passthrough"
 	}
-	driverType := getValueWithOverride(storedConfig, "DRIVER_TYPE", driverTypeEnv)
 
 	// Read module parameters from conf files
 	nvidiaParams := readModuleParams(nvidiaModuleConfigFile)
 	nvidiaUVMParams := readModuleParams(nvidiaUVMModuleConfigFile)
-	nvidiaModeset := readModuleParams(nvidiaModsetModuleConfigFile)
+	nvidiaModeset := readModuleParams(nvidiaModesetModuleConfigFile)
 	nvidiaPeermem := readModuleParams(nvidiaPeermemModuleConfigFile)
 
-	var config strings.Builder
-	config.WriteString(fmt.Sprintf("DRIVER_VERSION=%s\n", driverVersion))
-	config.WriteString(fmt.Sprintf("DRIVER_TYPE=%s\n", driverType))
-	config.WriteString(fmt.Sprintf("KERNEL_VERSION=%s\n", kernelVersion))
-	config.WriteString(fmt.Sprintf("GPU_DIRECT_RDMA_ENABLED=%v\n", dm.config.gpuDirectRDMAEnabled))
-	config.WriteString(fmt.Sprintf("USE_HOST_MOFED=%v\n", dm.config.useHostMofed))
-	config.WriteString(fmt.Sprintf("KERNEL_MODULE_TYPE=%s\n", kernelModuleType))
-	config.WriteString(fmt.Sprintf("NVIDIA_MODULE_PARAMS=%s\n", nvidiaParams))
-	config.WriteString(fmt.Sprintf("NVIDIA_UVM_MODULE_PARAMS=%s\n", nvidiaUVMParams))
-	config.WriteString(fmt.Sprintf("NVIDIA_MODESET_MODULE_PARAMS=%s\n", nvidiaModeset))
-	config.WriteString(fmt.Sprintf("NVIDIA_PEERMEM_MODULE_PARAMS=%s\n", nvidiaPeermem))
-
-	// Append config file contents directly
-	for _, file := range driverConfigFiles {
-		if data, err := os.ReadFile(file); err == nil && len(data) > 0 {
-			config.Write(data)
-		}
-	}
-
-	return config.String()
+	configTemplate := `DRIVER_VERSION=%s
+DRIVER_TYPE=%s
+KERNEL_VERSION=%s
+GPU_DIRECT_RDMA_ENABLED=%v
+USE_HOST_MOFED=%v
+KERNEL_MODULE_TYPE=%s
+NVIDIA_MODULE_PARAMS=%s
+NVIDIA_UVM_MODULE_PARAMS=%s
+NVIDIA_MODESET_MODULE_PARAMS=%s
+NVIDIA_PEERMEM_MODULE_PARAMS=%s
+`
+	return fmt.Sprintf(configTemplate,
+		dm.config.driverVersion,
+		driverType,
+		getKernelVersion(),
+		dm.config.gpuDirectRDMAEnabled,
+		dm.config.useHostMofed,
+		os.Getenv("KERNEL_MODULE_TYPE"),
+		nvidiaParams,
+		nvidiaUVMParams,
+		nvidiaModeset,
+		nvidiaPeermem,
+	)
 }
 
 // readModuleParams reads a module parameter config file and returns its contents as a single-line space-separated string
@@ -751,26 +727,28 @@ func readModuleParams(filepath string) string {
 	if err != nil {
 		return ""
 	}
-	// Convert newlines to spaces to match bash implementation
-	return strings.ReplaceAll(strings.TrimSpace(string(data)), "\n", " ")
+	// Convert newlines to spaces and trim whitespace/null bytes
+	return strings.Trim(strings.ReplaceAll(string(data), "\n", " "), " \r\n\t\u0000\uffff")
 }
 
-// driverModuleBuildNeeded checks if driver modules need to be rebuilt
-func (dm *DriverManager) driverModuleBuildNeeded() bool {
-	storedData, err := os.ReadFile(driverConfigStateFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			dm.log.Info("No previous driver configuration found")
-			return true
-		}
-		dm.log.Warnf("Failed to read driver config state file: %v", err)
+// shouldUpdateDriverConfig checks if the driver configuration needs to be updated
+func (dm *DriverManager) shouldUpdateDriverConfig() bool {
+	if !dm.isDriverLoaded() {
 		return true
 	}
 
-	storedConfig := string(storedData)
-	currentConfig := dm.buildCurrentConfig(storedConfig)
+	storedConfig, err := os.ReadFile(driverConfigStateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			dm.log.Info("No previous driver configuration found")
+		} else {
+			dm.log.Warnf("Failed to read driver config state file: %v", err)
+		}
+		return true
+	}
 
-	return currentConfig != storedConfig
+	currentConfig := dm.buildCurrentConfig()
+	return currentConfig != string(storedConfig)
 }
 
 func (dm *DriverManager) shouldSkipUninstall() bool {
@@ -779,8 +757,7 @@ func (dm *DriverManager) shouldSkipUninstall() bool {
 		return false
 	}
 
-	// Only skip uninstall if driver IS loaded AND config matches (fast path optimization)
-	if dm.isDriverLoaded() && !dm.driverModuleBuildNeeded() {
+	if !dm.shouldUpdateDriverConfig() {
 		dm.log.Info("Driver is loaded with matching config, enabling fast path")
 		return true
 	}
