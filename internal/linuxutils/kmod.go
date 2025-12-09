@@ -95,7 +95,7 @@ func (km *KernelModules) List(searchKey string) error {
 
 			usedBy := fields[3]
 
-			fmt.Printf("%-20s %-10d %-15d %s\n", name, size, refCnt, usedBy)
+			km.log.Printf("%-20s %-10d %-15d %s\n", name, size, refCnt, usedBy)
 		}
 	}
 
