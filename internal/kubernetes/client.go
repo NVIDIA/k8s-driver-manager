@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/retry"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/drain"
 )
@@ -107,12 +108,15 @@ func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string)
 		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
-	_, err = c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to update the labels of node %s: %w", nodeName, err)
-	}
-
-	return nil
+	return retry.OnError(retry.DefaultBackoff, func(err error) bool {
+		return true
+	}, func() error {
+		_, err := c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+		if err != nil {
+			c.log.Warnf("Failed to update labels on node %s, retrying: %v", nodeName, err)
+		}
+		return err
+	})
 }
 
 // GetNodeAnnotationValue returns the annotation value given a node name and annotation key
