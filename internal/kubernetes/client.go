@@ -41,6 +41,7 @@ const (
 	nvidiaDomainPrefix       = "nvidia.com"
 	nvidiaResourceNamePrefix = nvidiaDomainPrefix + "/" + "gpu"
 	nvidiaMigResourcePrefix  = nvidiaDomainPrefix + "/" + "mig-"
+	nvidiaDRADriverName      = "gpu." + nvidiaDomainPrefix
 )
 
 // Client represents a Kubernetes client wrapper use to perform all the Kubernetes operations required by k8s-driver-manager
@@ -48,7 +49,8 @@ type Client struct {
 	ctx context.Context
 	log *logrus.Logger
 
-	clientset *kubernetes.Clientset
+	clientset  *kubernetes.Clientset
+	claimCache *ResourceClaimCache
 }
 
 // DrainOptions represents the option parameters that can passed to the drain.Helper struct
@@ -61,22 +63,26 @@ type DrainOptions struct {
 
 // NewClient instantiates a new Kubernetes.Client
 func NewClient(ctx context.Context, kubeconfig string, log *logrus.Logger) (*Client, error) {
-	// Load kubeconfig
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build kubeconfig: %w", err)
 	}
 
-	// Create clientset
 	k8sClientSet, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 
+	claimCache := NewResourceClaimCache(k8sClientSet, log)
+	if err := claimCache.Start(ctx); err != nil {
+		return nil, fmt.Errorf("failed to start ResourceClaim cache: %w", err)
+	}
+
 	return &Client{
-		ctx:       ctx,
-		log:       log,
-		clientset: k8sClientSet,
+		ctx:        ctx,
+		log:        log,
+		clientset:  k8sClientSet,
+		claimCache: claimCache,
 	}, nil
 }
 
@@ -200,11 +206,14 @@ func (c *Client) DeleteOrEvictPods(nodeName string, drainOpts DrainOptions) erro
 	c.log.Infof("Draining node %s of any GPU pods", nodeName)
 
 	customDrainFilter := func(pod corev1.Pod) drain.PodDeleteStatus {
-		deletePod := gpuPodSpecFilter(pod)
-		if !deletePod {
-			return drain.MakePodDeleteStatusSkip()
+		usesGPU, err := c.podUsesGPU(pod, drainOpts.Timeout)
+		if err != nil {
+			return drain.MakePodDeleteStatusWithError(err.Error())
 		}
-		return drain.MakePodDeleteStatusOkay()
+		if usesGPU {
+			return drain.MakePodDeleteStatusOkay()
+		}
+		return drain.MakePodDeleteStatusSkip()
 	}
 
 	drainHelper := drain.Helper{
@@ -235,8 +244,12 @@ func (c *Client) DeleteOrEvictPods(nodeName string, drainOpts DrainOptions) erro
 	// Get number of GPU pods on the node which require deletion
 	numPodsToDelete := 0
 	for _, pod := range podList.Items {
-		if gpuPodSpecFilter(pod) {
-			numPodsToDelete += 1
+		usesGPU, err := c.podUsesGPU(pod, drainOpts.Timeout)
+		if err != nil {
+			return fmt.Errorf("failed to check GPU usage for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+		if usesGPU {
+			numPodsToDelete++
 		}
 	}
 
@@ -268,7 +281,9 @@ func (c *Client) DeleteOrEvictPods(nodeName string, drainOpts DrainOptions) erro
 	return nil
 }
 
-func gpuPodSpecFilter(pod corev1.Pod) bool {
+// podUsesGPU checks if a pod uses NVIDIA GPU resources via traditional resource requests/limits or DRA ResourceClaims.
+// Traditional resources are checked via container specs; DRA usage is checked via cached ResourceClaim data (O(1) lookup).
+func (c *Client) podUsesGPU(pod corev1.Pod, _ time.Duration) (bool, error) {
 	gpuInResourceList := func(rl corev1.ResourceList) bool {
 		for resourceName := range rl {
 			str := string(resourceName)
@@ -279,10 +294,16 @@ func gpuPodSpecFilter(pod corev1.Pod) bool {
 		return false
 	}
 
-	for _, c := range pod.Spec.Containers {
-		if gpuInResourceList(c.Resources.Limits) || gpuInResourceList(c.Resources.Requests) {
-			return true
+	for _, container := range pod.Spec.Containers {
+		if gpuInResourceList(container.Resources.Limits) || gpuInResourceList(container.Resources.Requests) {
+			return true, nil
 		}
 	}
-	return false
+
+	// Check DRA ResourceClaims via cached informer data (O(1) lookup)
+	if len(pod.Spec.ResourceClaims) > 0 && c.claimCache.PodUsesNvidiaGPU(pod.UID) {
+		return true, nil
+	}
+
+	return false, nil
 }
