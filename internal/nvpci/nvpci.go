@@ -19,6 +19,7 @@ package nvpci
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -37,7 +38,7 @@ const (
 
 type Interface interface {
 	nvpci.Interface
-	BindToVFIODriver(*nvpci.NvidiaPCIDevice) error
+	BindToVFIODriver(*nvpci.NvidiaPCIDevice, bool) error
 	UnbindFromDriver(*nvpci.NvidiaPCIDevice) error
 }
 
@@ -94,9 +95,9 @@ func WithLogger(logger *logrus.Logger) Option {
 
 // (cdesiniotis) ideally this method would be attached to the nvcpi.NvidiaPCIDevice struct
 // which removes the need for this wrapper
-func (w *nvpciWrapper) BindToVFIODriver(dev *nvpci.NvidiaPCIDevice) error {
+func (w *nvpciWrapper) BindToVFIODriver(dev *nvpci.NvidiaPCIDevice, loadVFIOModule bool) error {
 	nvdev := &nvidiaPCIDevice{dev}
-	return w.bindToVFIODriver(nvdev)
+	return w.bindToVFIODriver(nvdev, loadVFIOModule)
 }
 
 // (cdesiniotis) ideally this method would be attached to the nvcpi.NvidiaPCIDevice struct
@@ -106,7 +107,7 @@ func (w *nvpciWrapper) UnbindFromDriver(dev *nvpci.NvidiaPCIDevice) error {
 	return w.unbindFromDriver(nvdev)
 }
 
-func (w *nvpciWrapper) bindToVFIODriver(device *nvidiaPCIDevice) error {
+func (w *nvpciWrapper) bindToVFIODriver(device *nvidiaPCIDevice, loadVFIOModule bool) error {
 	vfioDriverName, err := w.findBestVFIOVariant(device)
 	if err != nil {
 		return fmt.Errorf("failed to find best vfio variant driver: %w", err)
@@ -138,6 +139,12 @@ func (w *nvpciWrapper) bindToVFIODriver(device *nvidiaPCIDevice) error {
 	}
 
 	w.logger.Infof("Binding device %s to driver: %s", device.Address, vfioDriverName)
+
+	if loadVFIOModule {
+		if err := loadKernelModule(vfioDriverName); err != nil {
+			return fmt.Errorf("failed to load %q kernel module: %w", vfioDriverName, err)
+		}
+	}
 
 	if device.Driver != vfioDriverName {
 		if err := unbind(device.Address); err != nil {
@@ -247,6 +254,11 @@ func getDriver(devicePath string) (string, error) {
 		return filepath.Base(driver), nil
 	}
 	return "", err
+}
+
+func loadKernelModule(module string) error {
+	cmd := exec.Command("chroot", "/host", "modprobe", module)
+	return cmd.Run()
 }
 
 func bind(device string, driver string) error {
