@@ -33,8 +33,9 @@ type bindCommand struct {
 }
 
 type bindOptions struct {
-	all      bool
-	deviceID string
+	all            bool
+	deviceID       string
+	loadVFIOModule bool
 }
 
 // newBindCommand constructs a bind command with the specified logger
@@ -75,6 +76,13 @@ func (m bindCommand) build() *cli.Command {
 				Destination: &cfg.deviceID,
 				Usage:       "Specific device ID to bind (e.g., 0000:01:00.0)",
 			},
+			&cli.BoolFlag{
+				Name:        "load-vfio-module",
+				Aliases:     []string{"l"},
+				Destination: &cfg.loadVFIOModule,
+				Value:       true,
+				Usage:       "Load the vfio-pci driver before binding devices to it",
+			},
 		},
 	}
 
@@ -95,13 +103,13 @@ func (m bindCommand) validateFlags(cfg *bindOptions) error {
 
 func (m bindCommand) run(cfg *bindOptions) error {
 	if cfg.deviceID != "" {
-		return m.bindDevice(cfg.deviceID)
+		return m.bindDevice(cfg.deviceID, cfg.loadVFIOModule)
 	}
 
-	return m.bindAll()
+	return m.bindAll(cfg.loadVFIOModule)
 }
 
-func (m bindCommand) bindAll() error {
+func (m bindCommand) bindAll(loadVFIOModule bool) error {
 	devices, err := m.nvpciLib.GetGPUs()
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA GPUs: %w", err)
@@ -110,7 +118,7 @@ func (m bindCommand) bindAll() error {
 	for _, dev := range devices {
 		m.logger.Infof("Binding device %s", dev.Address)
 		// (cdesiniotis) ideally this should be replaced by a call to nvdev.BindToVFIODriver()
-		if err := m.nvpciLib.BindToVFIODriver(dev); err != nil {
+		if err := m.nvpciLib.BindToVFIODriver(dev, loadVFIOModule); err != nil {
 			m.logger.Warnf("Failed to bind device %s: %v", dev.Address, err)
 		}
 	}
@@ -118,7 +126,7 @@ func (m bindCommand) bindAll() error {
 	return nil
 }
 
-func (m bindCommand) bindDevice(device string) error {
+func (m bindCommand) bindDevice(device string, loadVFIOModule bool) error {
 	nvdev, err := m.nvpciLib.GetGPUByPciBusID(device)
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA GPU device: %w", err)
@@ -131,7 +139,7 @@ func (m bindCommand) bindDevice(device string) error {
 	m.logger.Infof("Binding device %s", device)
 
 	// (cdesiniotis) ideally this should be replaced by a call to nvdev.BindToVFIODriver()
-	if err := m.nvpciLib.BindToVFIODriver(nvdev); err != nil {
+	if err := m.nvpciLib.BindToVFIODriver(nvdev, loadVFIOModule); err != nil {
 		return fmt.Errorf("failed to bind device %s to vfio driver: %w", device, err)
 	}
 
