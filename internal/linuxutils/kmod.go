@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -28,7 +29,8 @@ import (
 )
 
 const (
-	procModules = "/proc/modules"
+	procModules   = "/proc/modules"
+	sysModuleRoot = "/sys/module"
 )
 
 type KernelModules struct {
@@ -43,6 +45,9 @@ func NewKernelModules(log *logrus.Logger, options ...func(modules *KernelModules
 	}
 	for _, option := range options {
 		option(km)
+	}
+	if km.root == "" {
+		km.root = "/"
 	}
 	return km
 }
@@ -104,4 +109,25 @@ func (km *KernelModules) List(searchKey string) error {
 		return err
 	}
 	return nil
+}
+
+func (km *KernelModules) Load(module string) error {
+	cmd := exec.Command("chroot", km.root, "modprobe", module)
+	return cmd.Run()
+}
+
+func (km *KernelModules) IsLoaded(module string) (bool, error) {
+	f, err := os.Stat(filepath.Join(sysModuleRoot, module))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if !f.IsDir() {
+		return false, nil
+	}
+
+	return true, nil
 }
