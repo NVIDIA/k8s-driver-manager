@@ -366,7 +366,7 @@ func (dm *DriverManager) uninstallDriver() error {
 	}
 
 	if err := dm.rescheduleGPUOperatorComponents(); err != nil {
-		dm.log.Warnf("Failed to reschedule GPU operator components: %v", err)
+		return fmt.Errorf("failed to reschedule GPU operator components: %w", err)
 	}
 
 	// Handle nouveau driver
