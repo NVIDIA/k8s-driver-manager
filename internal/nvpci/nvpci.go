@@ -24,6 +24,8 @@ import (
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/sirupsen/logrus"
+
+	"github.com/NVIDIA/k8s-driver-manager/internal/linuxutils"
 )
 
 const (
@@ -37,13 +39,14 @@ const (
 
 type Interface interface {
 	nvpci.Interface
-	BindToVFIODriver(*nvpci.NvidiaPCIDevice) error
+	BindToVFIODriver(*nvpci.NvidiaPCIDevice, bool) error
 	UnbindFromDriver(*nvpci.NvidiaPCIDevice) error
 }
 
 type nvpciWrapper struct {
 	nvpci.Interface
-	logger *logrus.Logger
+	logger   *logrus.Logger
+	hostRoot string
 }
 
 type nvidiaPCIDevice struct {
@@ -63,6 +66,9 @@ func New(opts ...Option) Interface {
 	}
 	if n.logger == nil {
 		n.logger = logrus.New()
+	}
+	if n.hostRoot == "" {
+		n.hostRoot = "/"
 	}
 
 	// (cdesiniotis) Create an identical logger for the underlying nvpci library,
@@ -92,11 +98,18 @@ func WithLogger(logger *logrus.Logger) Option {
 	}
 }
 
+// WithHostRoot provides an Option to set the path to the host root filesystem
+func WithHostRoot(hostRoot string) Option {
+	return func(w *nvpciWrapper) {
+		w.hostRoot = hostRoot
+	}
+}
+
 // (cdesiniotis) ideally this method would be attached to the nvcpi.NvidiaPCIDevice struct
 // which removes the need for this wrapper
-func (w *nvpciWrapper) BindToVFIODriver(dev *nvpci.NvidiaPCIDevice) error {
+func (w *nvpciWrapper) BindToVFIODriver(dev *nvpci.NvidiaPCIDevice, loadVFIOModule bool) error {
 	nvdev := &nvidiaPCIDevice{dev}
-	return w.bindToVFIODriver(nvdev)
+	return w.bindToVFIODriver(nvdev, loadVFIOModule)
 }
 
 // (cdesiniotis) ideally this method would be attached to the nvcpi.NvidiaPCIDevice struct
@@ -106,10 +119,24 @@ func (w *nvpciWrapper) UnbindFromDriver(dev *nvpci.NvidiaPCIDevice) error {
 	return w.unbindFromDriver(nvdev)
 }
 
-func (w *nvpciWrapper) bindToVFIODriver(device *nvidiaPCIDevice) error {
+func (w *nvpciWrapper) bindToVFIODriver(device *nvidiaPCIDevice, loadVFIOModule bool) error {
 	vfioDriverName, err := w.findBestVFIOVariant(device)
 	if err != nil {
 		return fmt.Errorf("failed to find best vfio variant driver: %w", err)
+	}
+
+	if loadVFIOModule {
+		km := linuxutils.NewKernelModules(w.logger, linuxutils.WithRoot(w.hostRoot))
+		isLoaded, err := km.IsLoaded(vfioDriverName)
+		if err != nil {
+			return fmt.Errorf("failed to check if %q is loaded: %w", vfioDriverName, err)
+		}
+		if !isLoaded {
+			w.logger.Infof("Loading the VFIO driver: %q", vfioDriverName)
+			if err := km.Load(vfioDriverName); err != nil {
+				return fmt.Errorf("failed to load %q driver: %w", vfioDriverName, err)
+			}
+		}
 	}
 
 	// (cdesiniotis) Module names in the modules.alias file will only ever contain
