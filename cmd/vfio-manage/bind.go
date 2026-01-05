@@ -30,50 +30,53 @@ import (
 type bindCommand struct {
 	logger   *logrus.Logger
 	nvpciLib nvpci.Interface
+	options  bindOptions
 }
 
 type bindOptions struct {
 	all      bool
 	deviceID string
+	hostRoot string
 }
 
 // newBindCommand constructs a bind command with the specified logger
 func newBindCommand(logger *logrus.Logger) *cli.Command {
 	c := bindCommand{
 		logger: logger,
-		nvpciLib: nvpci.New(
-			nvpci.WithLogger(logger),
-		),
 	}
 	return c.build()
 }
 
 // build the bind command
 func (m bindCommand) build() *cli.Command {
-	cfg := bindOptions{}
-
-	// Create the 'bind' command
 	c := cli.Command{
 		Name:  "bind",
 		Usage: "Bind device(s) to vfio-pci driver",
 		Before: func(c *cli.Context) error {
-			return m.validateFlags(&cfg)
+			return m.validateFlags()
 		},
 		Action: func(c *cli.Context) error {
-			return m.run(&cfg)
+			return m.run()
 		},
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:        "all",
 				Aliases:     []string{"a"},
-				Destination: &cfg.all,
+				Destination: &m.options.all,
 				Usage:       "Bind all NVIDIA devices to vfio-pci",
 			},
 			&cli.StringFlag{
 				Name:        "device-id",
 				Aliases:     []string{"d"},
-				Destination: &cfg.deviceID,
+				Destination: &m.options.deviceID,
 				Usage:       "Specific device ID to bind (e.g., 0000:01:00.0)",
+			},
+			&cli.StringFlag{
+				Name:        "host-root",
+				Destination: &m.options.hostRoot,
+				EnvVars:     []string{"HOST_ROOT"},
+				Value:       "/",
+				Usage:       "Path to the host's root filesystem. This is used when loading the vfio-pci module.",
 			},
 		},
 	}
@@ -81,21 +84,26 @@ func (m bindCommand) build() *cli.Command {
 	return &c
 }
 
-func (m bindCommand) validateFlags(cfg *bindOptions) error {
-	if !cfg.all && cfg.deviceID == "" {
+func (m bindCommand) validateFlags() error {
+	if !m.options.all && m.options.deviceID == "" {
 		return fmt.Errorf("either --all or --device-id must be specified")
 	}
 
-	if cfg.all && cfg.deviceID != "" {
+	if m.options.all && m.options.deviceID != "" {
 		return fmt.Errorf("cannot specify both --all and --device-id")
 	}
 
 	return nil
 }
 
-func (m bindCommand) run(cfg *bindOptions) error {
-	if cfg.deviceID != "" {
-		return m.bindDevice(cfg.deviceID)
+func (m bindCommand) run() error {
+	m.nvpciLib = nvpci.New(
+		nvpci.WithLogger(m.logger),
+		nvpci.WithHostRoot(m.options.hostRoot),
+	)
+
+	if m.options.deviceID != "" {
+		return m.bindDevice()
 	}
 
 	return m.bindAll()
@@ -118,7 +126,8 @@ func (m bindCommand) bindAll() error {
 	return nil
 }
 
-func (m bindCommand) bindDevice(device string) error {
+func (m bindCommand) bindDevice() error {
+	device := m.options.deviceID
 	nvdev, err := m.nvpciLib.GetGPUByPciBusID(device)
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA GPU device: %w", err)

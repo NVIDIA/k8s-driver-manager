@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -43,6 +44,9 @@ func NewKernelModules(log *logrus.Logger, options ...func(modules *KernelModules
 	}
 	for _, option := range options {
 		option(km)
+	}
+	if km.root == "" {
+		km.root = "/"
 	}
 	return km
 }
@@ -104,4 +108,9 @@ func (km *KernelModules) List(searchKey string) error {
 		return err
 	}
 	return nil
+}
+
+func (km *KernelModules) Load(module string) error {
+	cmd := exec.Command("chroot", km.root, "modprobe", module)
+	return cmd.Run()
 }

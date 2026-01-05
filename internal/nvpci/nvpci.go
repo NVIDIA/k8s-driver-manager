@@ -24,6 +24,8 @@ import (
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/sirupsen/logrus"
+
+	"github.com/NVIDIA/k8s-driver-manager/internal/linuxutils"
 )
 
 const (
@@ -43,7 +45,8 @@ type Interface interface {
 
 type nvpciWrapper struct {
 	nvpci.Interface
-	logger *logrus.Logger
+	logger   *logrus.Logger
+	hostRoot string
 }
 
 type nvidiaPCIDevice struct {
@@ -63,6 +66,9 @@ func New(opts ...Option) Interface {
 	}
 	if n.logger == nil {
 		n.logger = logrus.New()
+	}
+	if n.hostRoot == "" {
+		n.hostRoot = "/"
 	}
 
 	// (cdesiniotis) Create an identical logger for the underlying nvpci library,
@@ -92,6 +98,13 @@ func WithLogger(logger *logrus.Logger) Option {
 	}
 }
 
+// WithHostRoot provides an Option to set the path to the host root filesystem
+func WithHostRoot(hostRoot string) Option {
+	return func(w *nvpciWrapper) {
+		w.hostRoot = hostRoot
+	}
+}
+
 // (cdesiniotis) ideally this method would be attached to the nvcpi.NvidiaPCIDevice struct
 // which removes the need for this wrapper
 func (w *nvpciWrapper) BindToVFIODriver(dev *nvpci.NvidiaPCIDevice) error {
@@ -110,6 +123,11 @@ func (w *nvpciWrapper) bindToVFIODriver(device *nvidiaPCIDevice) error {
 	vfioDriverName, err := w.findBestVFIOVariant(device)
 	if err != nil {
 		return fmt.Errorf("failed to find best vfio variant driver: %w", err)
+	}
+
+	km := linuxutils.NewKernelModules(w.logger, linuxutils.WithRoot(w.hostRoot))
+	if err := km.Load(vfioDriverName); err != nil {
+		return fmt.Errorf("failed to load %q driver: %w", vfioDriverName, err)
 	}
 
 	// (cdesiniotis) Module names in the modules.alias file will only ever contain

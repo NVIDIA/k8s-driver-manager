@@ -30,6 +30,7 @@ import (
 type unbindCommand struct {
 	logger   *logrus.Logger
 	nvpciLib nvpci.Interface
+	options  unbindOptions
 }
 
 type unbindOptions struct {
@@ -50,29 +51,26 @@ func newUnbindCommand(logger *logrus.Logger) *cli.Command {
 
 // build the unbind command
 func (m unbindCommand) build() *cli.Command {
-	cfg := unbindOptions{}
-
-	// Create the 'unbind' command
 	c := cli.Command{
 		Name:  "unbind",
 		Usage: "Unbind device(s) from their current driver",
 		Before: func(c *cli.Context) error {
-			return m.validateFlags(&cfg)
+			return m.validateFlags()
 		},
 		Action: func(c *cli.Context) error {
-			return m.run(&cfg)
+			return m.run()
 		},
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:        "all",
 				Aliases:     []string{"a"},
-				Destination: &cfg.all,
+				Destination: &m.options.all,
 				Usage:       "Bind all NVIDIA devices to vfio-pci",
 			},
 			&cli.StringFlag{
 				Name:        "device-id",
 				Aliases:     []string{"d"},
-				Destination: &cfg.deviceID,
+				Destination: &m.options.deviceID,
 				Usage:       "Specific device ID to bind (e.g., 0000:01:00.0)",
 			},
 		},
@@ -81,21 +79,21 @@ func (m unbindCommand) build() *cli.Command {
 	return &c
 }
 
-func (m unbindCommand) validateFlags(cfg *unbindOptions) error {
-	if !cfg.all && cfg.deviceID == "" {
+func (m unbindCommand) validateFlags() error {
+	if !m.options.all && m.options.deviceID == "" {
 		return fmt.Errorf("either --all or --device-id must be specified")
 	}
 
-	if cfg.all && cfg.deviceID != "" {
+	if m.options.all && m.options.deviceID != "" {
 		return fmt.Errorf("cannot specify both --all and --device-id")
 	}
 
 	return nil
 }
 
-func (m unbindCommand) run(cfg *unbindOptions) error {
-	if cfg.deviceID != "" {
-		return m.unbindDevice(cfg.deviceID)
+func (m unbindCommand) run() error {
+	if m.options.deviceID != "" {
+		return m.unbindDevice()
 	}
 
 	return m.unbindAll()
@@ -117,7 +115,8 @@ func (m unbindCommand) unbindAll() error {
 	return nil
 }
 
-func (m unbindCommand) unbindDevice(device string) error {
+func (m unbindCommand) unbindDevice() error {
+	device := m.options.deviceID
 	nvdev, err := m.nvpciLib.GetGPUByPciBusID(device)
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA GPU device: %w", err)
