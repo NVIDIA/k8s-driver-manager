@@ -40,12 +40,13 @@ import (
 )
 
 const (
-	driverRoot          = "/run/nvidia/driver"
-	driverPIDFile       = "/run/nvidia/nvidia-driver.pid"
-	operatorNamespace   = "gpu-operator"
-	pausedStr           = "paused-for-driver-upgrade"
-	defaultDrainTimeout = time.Second * 0
-	defaultGracePeriod  = 5 * time.Minute
+	driverRoot             = "/run/nvidia/driver"
+	driverPIDFile          = "/run/nvidia/nvidia-driver.pid"
+	additionalDriversFlags = driverRoot + "/.additional-drivers-flags"
+	operatorNamespace      = "gpu-operator"
+	pausedStr              = "paused-for-driver-upgrade"
+	defaultDrainTimeout    = time.Second * 0
+	defaultGracePeriod     = 5 * time.Minute
 
 	nvidiaDomainPrefix = "nvidia.com"
 
@@ -342,6 +343,11 @@ func (dm *DriverManager) uninstallDriver() error {
 		dm.log.Info("Successfully uninstalled nvidia driver components")
 	}
 
+	err := dm.removeAdditionalDriversFlagsFile()
+	if err != nil {
+		dm.log.Errorf("Failed to remove additional drivers flags file: %v", err)
+	}
+
 	// Handle vfio-pci driver unbinding
 	if err := dm.unbindVfioPCI(); err != nil {
 		dm.log.Error("Unable to unbind vfio-pci driver from all devices")
@@ -378,6 +384,13 @@ func (dm *DriverManager) uninstallDriver() error {
 	}
 
 	dm.log.Info("Driver uninstallation completed successfully")
+	return nil
+}
+
+func (dm *DriverManager) removeAdditionalDriversFlagsFile() error {
+	if err := os.Remove(additionalDriversFlags); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove additional drivers flags file: %w", err)
+	}
 	return nil
 }
 
