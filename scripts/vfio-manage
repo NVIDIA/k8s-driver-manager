@@ -45,12 +45,27 @@ unbind_from_other_driver() {
 }
 
 is_nvidia_gpu_device() {
-    gpu=$1
-    # make sure device class is for NVIDIA GPU
-    device_class_file=$(readlink -f "/sys/bus/pci/devices/$gpu/class")
+    dev=$1
+    # make sure device class is for NVIDIA GPU (3D controller or VGA compatible)
+    device_class_file=$(readlink -f "/sys/bus/pci/devices/$dev/class")
     device_class=$(cat "$device_class_file")
     [ "$device_class" = "0x030200" ] || [ "$device_class" = "0x030000" ] || return 1
     return 0
+}
+
+is_nvidia_nvswitch_device() {
+    dev=$1
+    # make sure device class is for NVIDIA NVSwitch (bridge device)
+    device_class_file=$(readlink -f "/sys/bus/pci/devices/$dev/class")
+    device_class=$(cat "$device_class_file")
+    [ "$device_class" = "0x068000" ] || return 1
+    return 0
+}
+
+is_nvidia_device() {
+    dev=$1
+    # check if device is either a GPU or NVSwitch
+    is_nvidia_gpu_device "$dev" || is_nvidia_nvswitch_device "$dev"
 }
 
 is_bound_to_vfio() {
@@ -71,19 +86,21 @@ is_bound_to_vfio() {
 }
 
 unbind_device() {
-    gpu=$1
+    dev=$1
 
-    if ! is_nvidia_gpu_device "$gpu"; then
+    if ! is_nvidia_device "$dev"; then
         return 0
     fi
 
-    echo "unbinding device $gpu"
-    unbind_from_driver "$gpu"
-    #for graphics mode, we need to unbind the auxiliary device as well
-    aux_dev=$(get_graphics_aux_dev "$gpu")
-    if [ "$aux_dev" != "NONE" ]; then
-      echo "gpu $gpu is in graphics mode aux_dev $aux_dev"
-      unbind_from_driver "$aux_dev"
+    echo "unbinding device $dev"
+    unbind_from_driver "$dev"
+    # for graphics mode GPUs, we need to unbind the auxiliary device as well
+    if is_nvidia_gpu_device "$dev"; then
+        aux_dev=$(get_graphics_aux_dev "$dev")
+        if [ "$aux_dev" != "NONE" ]; then
+            echo "gpu $dev is in graphics mode aux_dev $aux_dev"
+            unbind_from_driver "$aux_dev"
+        fi
     fi
 }
 
@@ -136,19 +153,21 @@ get_graphics_aux_dev() {
 }
 
 bind_device() {
-    gpu=$1
+    dev=$1
 
-    if ! is_nvidia_gpu_device "$gpu"; then
-        echo "device $gpu is not a gpu!"
+    if ! is_nvidia_device "$dev"; then
+        echo "device $dev is not an NVIDIA GPU or NVSwitch!"
         return 0
     fi
 
-    bind_pci_device "$gpu"
-    #for graphics mode, we need to bind the auxiliary device as well
-    aux_dev=$(get_graphics_aux_dev "$gpu")
-    if [ "$aux_dev" != "NONE" ]; then
-      echo "gpu $gpu is in graphics mode aux_dev $aux_dev"
-      bind_pci_device "$aux_dev"
+    bind_pci_device "$dev"
+    # for graphics mode GPUs, we need to bind the auxiliary device as well
+    if is_nvidia_gpu_device "$dev"; then
+        aux_dev=$(get_graphics_aux_dev "$dev")
+        if [ "$aux_dev" != "NONE" ]; then
+            echo "gpu $dev is in graphics mode aux_dev $aux_dev"
+            bind_pci_device "$aux_dev"
+        fi
     fi
 }
 
