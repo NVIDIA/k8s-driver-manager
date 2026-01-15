@@ -105,6 +105,12 @@ func (m unbindCommand) unbindAll() error {
 		return fmt.Errorf("failed to get NVIDIA GPUs: %w", err)
 	}
 
+	nvswitches, err := m.nvpciLib.GetNVSwitches()
+	if err != nil {
+		return fmt.Errorf("failed to get NVIDIA NVSwitches: %w", err)
+	}
+	devices = append(devices, nvswitches...)
+
 	for _, dev := range devices {
 		m.logger.Infof("Unbinding device %s", dev.Address)
 		// (cdesiniotis) ideally this should be replaced by a call to nvdev.UnbindFromDriver()
