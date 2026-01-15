@@ -134,12 +134,14 @@ func (m bindCommand) bindAll() error {
 
 func (m bindCommand) bindDevice() error {
 	device := m.options.deviceID
+	// Note: Despite its name, GetGPUByPciBusID returns any NVIDIA PCI device
+	// (GPU, NVSwitch, etc.) at the specified address, not just GPUs.
 	nvdev, err := m.nvpciLib.GetGPUByPciBusID(device)
 	if err != nil {
-		return fmt.Errorf("failed to get NVIDIA GPU device: %w", err)
+		return fmt.Errorf("failed to get NVIDIA device: %w", err)
 	}
-	if nvdev == nil || !nvdev.IsGPU() {
-		m.logger.Infof("Device %s is not a GPU", device)
+	if nvdev == nil || (!nvdev.IsGPU() && !nvdev.IsNVSwitch()) {
+		m.logger.Infof("Device %s is not an NVIDIA GPU or NVSwitch", device)
 		return nil
 	}
 
