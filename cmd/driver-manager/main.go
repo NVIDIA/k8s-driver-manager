@@ -34,6 +34,7 @@ import (
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
 
+	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/NVIDIA/k8s-driver-manager/internal/info"
 	kube "github.com/NVIDIA/k8s-driver-manager/internal/kubernetes"
 	"github.com/NVIDIA/k8s-driver-manager/internal/linuxutils"
@@ -62,6 +63,8 @@ const (
 	nvidiaSandboxValidatorDeployLabel    = nvidiaDomainPrefix + "/" + "gpu.deploy.sandbox-validator"
 	nvidiaSandboxDevicePluginDeployLabel = nvidiaDomainPrefix + "/" + "gpu.deploy.sandbox-device-plugin"
 	nvidiaVGPUDeviceManagerDeployLabel   = nvidiaDomainPrefix + "/" + "gpu.deploy.vgpu-device-manager"
+
+	gpuWorkloadConfigLabelKey = nvidiaDomainPrefix + "/" + "gpu.workload.config"
 )
 
 // Configuration holds all the configuration from environment variables
@@ -796,9 +799,20 @@ func (dm *DriverManager) unmountRootfs() error {
 }
 
 // If vfio-pci driver is in use, ensure we unbind it from all devices.
-// If vfio-pci driver is not in use, and we have reached this point, all devices will not be bound to any driver,
-// so the below unbind operation will be a no-op.
+// If we're in VFIO workload mode and GPUs are already bound to vfio-pci variants, skip unbind.
 func (dm *DriverManager) unbindVfioPCI() error {
+	if dm.isVFIOWorkloadConfig() {
+		allOnVFIO, err := dm.areAllGPUsOnVFIO()
+		if err != nil {
+			return fmt.Errorf("failed to check GPU driver state: %w", err)
+		}
+
+		if allOnVFIO {
+			dm.log.Info("All GPUs already bound to vfio-pci variants, skipping unbind")
+			return nil
+		}
+	}
+
 	dm.log.Info("Unbinding vfio-pci driver from all devices")
 	cmd := exec.Command("vfio-manage", "unbind", "--all")
 	return cmd.Run()
@@ -952,4 +966,44 @@ func (dm *DriverManager) cleanupOnFailure() {
 	if err := dm.rescheduleGPUOperatorComponents(); err != nil {
 		dm.log.Warnf("Failed to reschedule GPU operator components during cleanup: %v", err)
 	}
+}
+
+func (dm *DriverManager) isVFIOWorkloadConfig() bool {
+	workloadConfig, err := dm.kubeClient.GetNodeLabelValue(dm.config.nodeName, gpuWorkloadConfigLabelKey)
+	if err != nil {
+		dm.log.Warnf("Failed to get workload config label: %v", err)
+		return false
+	}
+
+	return strings.HasPrefix(workloadConfig, "vm-")
+}
+
+func (dm *DriverManager) areAllGPUsOnVFIO() (bool, error) {
+	nvpciLib := nvpci.New(nvpci.WithLogger(dm.log))
+
+	devices, err := nvpciLib.GetGPUs()
+	if err != nil {
+		return false, fmt.Errorf("failed to enumerate GPUs: %w", err)
+	}
+
+	if len(devices) == 0 {
+		dm.log.Info("No GPUs found on node")
+		return true, nil
+	}
+
+	for _, dev := range devices {
+		if !isVFIODriver(dev.Driver) {
+			dm.log.Infof("GPU %s is bound to %s (not vfio)", dev.Address, dev.Driver)
+			return false, nil
+		}
+		dm.log.Debugf("GPU %s is bound to %s", dev.Address, dev.Driver)
+	}
+
+	dm.log.Infof("All %d GPUs are on vfio-pci variants", len(devices))
+	return true, nil
+}
+
+func isVFIODriver(driver string) bool {
+	// Match vfio-pci and variants like nvgrace_gpu_vfio_pci
+	return driver == "vfio-pci" || strings.HasSuffix(driver, "_vfio_pci")
 }
