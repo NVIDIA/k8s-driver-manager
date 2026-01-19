@@ -34,8 +34,9 @@ type unbindCommand struct {
 }
 
 type unbindOptions struct {
-	all      bool
-	deviceID string
+	all              bool
+	deviceID         string
+	unbindNVSwitches bool
 }
 
 // newUnbindCommand constructs an unbind command with the specified logger
@@ -71,7 +72,13 @@ func (m unbindCommand) build() *cli.Command {
 				Name:        "device-id",
 				Aliases:     []string{"d"},
 				Destination: &m.options.deviceID,
-				Usage:       "Specific device ID to bind (e.g., 0000:01:00.0)",
+				Usage:       "Specific device ID to unbind (e.g., 0000:01:00.0)",
+			},
+			&cli.BoolFlag{
+				Name:        "unbind-nvswitches",
+				Destination: &m.options.unbindNVSwitches,
+				EnvVars:     []string{"BIND_NVSWITCHES"},
+				Usage:       "Also unbind NVSwitches from their driver (default: false)",
 			},
 		},
 	}
@@ -105,11 +112,13 @@ func (m unbindCommand) unbindAll() error {
 		return fmt.Errorf("failed to get NVIDIA GPUs: %w", err)
 	}
 
-	nvswitches, err := m.nvpciLib.GetNVSwitches()
-	if err != nil {
-		return fmt.Errorf("failed to get NVIDIA NVSwitches: %w", err)
+	if m.options.unbindNVSwitches {
+		nvswitches, err := m.nvpciLib.GetNVSwitches()
+		if err != nil {
+			return fmt.Errorf("failed to get NVIDIA NVSwitches: %w", err)
+		}
+		devices = append(devices, nvswitches...)
 	}
-	devices = append(devices, nvswitches...)
 
 	for _, dev := range devices {
 		m.logger.Infof("Unbinding device %s", dev.Address)
@@ -129,7 +138,15 @@ func (m unbindCommand) unbindDevice() error {
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA device: %w", err)
 	}
-	if nvdev == nil || (!nvdev.IsGPU() && !nvdev.IsNVSwitch()) {
+	if nvdev == nil {
+		m.logger.Infof("Device %s is not an NVIDIA device", device)
+		return nil
+	}
+	if nvdev.IsNVSwitch() && !m.options.unbindNVSwitches {
+		m.logger.Infof("Skipping NVSwitch %s (BIND_NVSWITCHES not set)", device)
+		return nil
+	}
+	if !nvdev.IsGPU() && !nvdev.IsNVSwitch() {
 		m.logger.Infof("Device %s is not an NVIDIA GPU or NVSwitch", device)
 		return nil
 	}
