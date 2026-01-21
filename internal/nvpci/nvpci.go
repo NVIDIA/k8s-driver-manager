@@ -282,6 +282,11 @@ func bind(device string, driver string) error {
 }
 
 func unbind(device string) error {
+	driverOverridePath := filepath.Join(pciDevicesRoot, device, "driver_override")
+	if err := os.WriteFile(driverOverridePath, []byte("\n"), 0644); err != nil {
+		return fmt.Errorf("failed to clear driver_override for %s: %w", device, err)
+	}
+
 	driverPath := filepath.Join(pciDevicesRoot, device, "driver")
 	if _, err := os.Stat(driverPath); os.IsNotExist(err) {
 		return nil
