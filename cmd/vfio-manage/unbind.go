@@ -21,16 +21,18 @@ package main
 import (
 	"fmt"
 
+	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
-	"github.com/NVIDIA/k8s-driver-manager/internal/nvpci"
+	"github.com/NVIDIA/k8s-driver-manager/internal/nvpassthrough"
 )
 
 type unbindCommand struct {
-	logger   *logrus.Logger
-	nvpciLib nvpci.Interface
-	options  unbindOptions
+	logger        *logrus.Logger
+	nvpci         nvpci.Interface
+	nvpassthrough nvpassthrough.Interface
+	options       unbindOptions
 }
 
 type unbindOptions struct {
@@ -43,8 +45,11 @@ type unbindOptions struct {
 func newUnbindCommand(logger *logrus.Logger) *cli.Command {
 	c := unbindCommand{
 		logger: logger,
-		nvpciLib: nvpci.New(
+		nvpci: nvpci.New(
 			nvpci.WithLogger(logger),
+		),
+		nvpassthrough: nvpassthrough.New(
+			nvpassthrough.WithLogger(logger),
 		),
 	}
 	return c.build()
@@ -107,13 +112,13 @@ func (m unbindCommand) run() error {
 }
 
 func (m unbindCommand) unbindAll() error {
-	devices, err := m.nvpciLib.GetGPUs()
+	devices, err := m.nvpci.GetGPUs()
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA GPUs: %w", err)
 	}
 
 	if m.options.unbindNVSwitches {
-		nvswitches, err := m.nvpciLib.GetNVSwitches()
+		nvswitches, err := m.nvpci.GetNVSwitches()
 		if err != nil {
 			return fmt.Errorf("failed to get NVIDIA NVSwitches: %w", err)
 		}
@@ -122,8 +127,7 @@ func (m unbindCommand) unbindAll() error {
 
 	for _, dev := range devices {
 		m.logger.Infof("Unbinding device %s", dev.Address)
-		// (cdesiniotis) ideally this should be replaced by a call to nvdev.UnbindFromDriver()
-		if err := m.nvpciLib.UnbindFromDriver(dev); err != nil {
+		if err := m.nvpassthrough.UnbindFromDriver(dev); err != nil {
 			m.logger.Warnf("Failed to unbind device %s: %v", dev.Address, err)
 		}
 	}
@@ -134,7 +138,7 @@ func (m unbindCommand) unbindDevice() error {
 	device := m.options.deviceID
 	// Note: Despite its name, GetGPUByPciBusID returns any NVIDIA PCI device
 	// (GPU, NVSwitch, etc.) at the specified address, not just GPUs.
-	nvdev, err := m.nvpciLib.GetGPUByPciBusID(device)
+	nvdev, err := m.nvpci.GetGPUByPciBusID(device)
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA device: %w", err)
 	}
@@ -153,8 +157,7 @@ func (m unbindCommand) unbindDevice() error {
 
 	m.logger.Infof("Unbinding device %s", device)
 
-	// (cdesiniotis) ideally this should be replaced by a call to nvdev.UnbindFromDriver()
-	if err := m.nvpciLib.UnbindFromDriver(nvdev); err != nil {
+	if err := m.nvpassthrough.UnbindFromDriver(nvdev); err != nil {
 		return fmt.Errorf("failed to unbind device %s from driver: %w", device, err)
 	}
 

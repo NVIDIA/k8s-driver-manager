@@ -21,16 +21,18 @@ package main
 import (
 	"fmt"
 
+	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
-	"github.com/NVIDIA/k8s-driver-manager/internal/nvpci"
+	"github.com/NVIDIA/k8s-driver-manager/internal/nvpassthrough"
 )
 
 type bindCommand struct {
-	logger   *logrus.Logger
-	nvpciLib nvpci.Interface
-	options  bindOptions
+	logger        *logrus.Logger
+	nvpci         nvpci.Interface
+	nvpassthrough nvpassthrough.Interface
+	options       bindOptions
 }
 
 type bindOptions struct {
@@ -104,9 +106,13 @@ func (m bindCommand) validateFlags() error {
 }
 
 func (m bindCommand) run() error {
-	m.nvpciLib = nvpci.New(
+	m.nvpci = nvpci.New(
 		nvpci.WithLogger(m.logger),
-		nvpci.WithHostRoot(m.options.hostRoot),
+	)
+
+	m.nvpassthrough = nvpassthrough.New(
+		nvpassthrough.WithLogger(m.logger),
+		nvpassthrough.WithHostRoot(m.options.hostRoot),
 	)
 
 	if m.options.deviceID != "" {
@@ -117,13 +123,13 @@ func (m bindCommand) run() error {
 }
 
 func (m bindCommand) bindAll() error {
-	devices, err := m.nvpciLib.GetGPUs()
+	devices, err := m.nvpci.GetGPUs()
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA GPUs: %w", err)
 	}
 
 	if m.options.bindNVSwitches {
-		nvswitches, err := m.nvpciLib.GetNVSwitches()
+		nvswitches, err := m.nvpci.GetNVSwitches()
 		if err != nil {
 			return fmt.Errorf("failed to get NVIDIA NVSwitches: %w", err)
 		}
@@ -132,8 +138,7 @@ func (m bindCommand) bindAll() error {
 
 	for _, dev := range devices {
 		m.logger.Infof("Binding device %s", dev.Address)
-		// (cdesiniotis) ideally this should be replaced by a call to nvdev.BindToVFIODriver()
-		if err := m.nvpciLib.BindToVFIODriver(dev); err != nil {
+		if err := m.nvpassthrough.BindToVFIODriver(dev); err != nil {
 			m.logger.Warnf("Failed to bind device %s: %v", dev.Address, err)
 		}
 	}
@@ -145,7 +150,7 @@ func (m bindCommand) bindDevice() error {
 	device := m.options.deviceID
 	// Note: Despite its name, GetGPUByPciBusID returns any NVIDIA PCI device
 	// (GPU, NVSwitch, etc.) at the specified address, not just GPUs.
-	nvdev, err := m.nvpciLib.GetGPUByPciBusID(device)
+	nvdev, err := m.nvpci.GetGPUByPciBusID(device)
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA device: %w", err)
 	}
@@ -164,8 +169,7 @@ func (m bindCommand) bindDevice() error {
 
 	m.logger.Infof("Binding device %s", device)
 
-	// (cdesiniotis) ideally this should be replaced by a call to nvdev.BindToVFIODriver()
-	if err := m.nvpciLib.BindToVFIODriver(nvdev); err != nil {
+	if err := m.nvpassthrough.BindToVFIODriver(nvdev); err != nil {
 		return fmt.Errorf("failed to bind device %s to vfio driver: %w", device, err)
 	}
 
