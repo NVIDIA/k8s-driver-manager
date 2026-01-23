@@ -34,8 +34,9 @@ type unbindCommand struct {
 }
 
 type unbindOptions struct {
-	all      bool
-	deviceID string
+	all              bool
+	deviceID         string
+	unbindNVSwitches bool
 }
 
 // newUnbindCommand constructs an unbind command with the specified logger
@@ -71,7 +72,13 @@ func (m unbindCommand) build() *cli.Command {
 				Name:        "device-id",
 				Aliases:     []string{"d"},
 				Destination: &m.options.deviceID,
-				Usage:       "Specific device ID to bind (e.g., 0000:01:00.0)",
+				Usage:       "Specific device ID to unbind (e.g., 0000:01:00.0)",
+			},
+			&cli.BoolFlag{
+				Name:        "unbind-nvswitches",
+				Destination: &m.options.unbindNVSwitches,
+				EnvVars:     []string{"BIND_NVSWITCHES"},
+				Usage:       "Also unbind NVSwitches from their driver (default: false)",
 			},
 		},
 	}
@@ -105,6 +112,14 @@ func (m unbindCommand) unbindAll() error {
 		return fmt.Errorf("failed to get NVIDIA GPUs: %w", err)
 	}
 
+	if m.options.unbindNVSwitches {
+		nvswitches, err := m.nvpciLib.GetNVSwitches()
+		if err != nil {
+			return fmt.Errorf("failed to get NVIDIA NVSwitches: %w", err)
+		}
+		devices = append(devices, nvswitches...)
+	}
+
 	for _, dev := range devices {
 		m.logger.Infof("Unbinding device %s", dev.Address)
 		// (cdesiniotis) ideally this should be replaced by a call to nvdev.UnbindFromDriver()
@@ -117,12 +132,22 @@ func (m unbindCommand) unbindAll() error {
 
 func (m unbindCommand) unbindDevice() error {
 	device := m.options.deviceID
+	// Note: Despite its name, GetGPUByPciBusID returns any NVIDIA PCI device
+	// (GPU, NVSwitch, etc.) at the specified address, not just GPUs.
 	nvdev, err := m.nvpciLib.GetGPUByPciBusID(device)
 	if err != nil {
-		return fmt.Errorf("failed to get NVIDIA GPU device: %w", err)
+		return fmt.Errorf("failed to get NVIDIA device: %w", err)
 	}
-	if nvdev == nil || !nvdev.IsGPU() {
-		m.logger.Infof("Device %s is not a GPU", device)
+	if nvdev == nil {
+		m.logger.Infof("Device %s is not an NVIDIA device", device)
+		return nil
+	}
+	if nvdev.IsNVSwitch() && !m.options.unbindNVSwitches {
+		m.logger.Infof("Skipping NVSwitch %s (BIND_NVSWITCHES not set)", device)
+		return nil
+	}
+	if !nvdev.IsGPU() && !nvdev.IsNVSwitch() {
+		m.logger.Infof("Device %s is not an NVIDIA GPU or NVSwitch", device)
 		return nil
 	}
 

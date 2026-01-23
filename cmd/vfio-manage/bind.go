@@ -34,9 +34,10 @@ type bindCommand struct {
 }
 
 type bindOptions struct {
-	all      bool
-	deviceID string
-	hostRoot string
+	all            bool
+	deviceID       string
+	hostRoot       string
+	bindNVSwitches bool
 }
 
 // newBindCommand constructs a bind command with the specified logger
@@ -78,6 +79,12 @@ func (m bindCommand) build() *cli.Command {
 				Value:       "/",
 				Usage:       "Path to the host's root filesystem. This is used when loading the vfio-pci module.",
 			},
+			&cli.BoolFlag{
+				Name:        "bind-nvswitches",
+				Destination: &m.options.bindNVSwitches,
+				EnvVars:     []string{"BIND_NVSWITCHES"},
+				Usage:       "Also bind NVSwitches to vfio-pci (default: false)",
+			},
 		},
 	}
 
@@ -115,6 +122,14 @@ func (m bindCommand) bindAll() error {
 		return fmt.Errorf("failed to get NVIDIA GPUs: %w", err)
 	}
 
+	if m.options.bindNVSwitches {
+		nvswitches, err := m.nvpciLib.GetNVSwitches()
+		if err != nil {
+			return fmt.Errorf("failed to get NVIDIA NVSwitches: %w", err)
+		}
+		devices = append(devices, nvswitches...)
+	}
+
 	for _, dev := range devices {
 		m.logger.Infof("Binding device %s", dev.Address)
 		// (cdesiniotis) ideally this should be replaced by a call to nvdev.BindToVFIODriver()
@@ -128,12 +143,22 @@ func (m bindCommand) bindAll() error {
 
 func (m bindCommand) bindDevice() error {
 	device := m.options.deviceID
+	// Note: Despite its name, GetGPUByPciBusID returns any NVIDIA PCI device
+	// (GPU, NVSwitch, etc.) at the specified address, not just GPUs.
 	nvdev, err := m.nvpciLib.GetGPUByPciBusID(device)
 	if err != nil {
-		return fmt.Errorf("failed to get NVIDIA GPU device: %w", err)
+		return fmt.Errorf("failed to get NVIDIA device: %w", err)
 	}
-	if nvdev == nil || !nvdev.IsGPU() {
-		m.logger.Infof("Device %s is not a GPU", device)
+	if nvdev == nil {
+		m.logger.Infof("Device %s is not an NVIDIA device", device)
+		return nil
+	}
+	if nvdev.IsNVSwitch() && !m.options.bindNVSwitches {
+		m.logger.Infof("Skipping NVSwitch %s (BIND_NVSWITCHES not set)", device)
+		return nil
+	}
+	if !nvdev.IsGPU() && !nvdev.IsNVSwitch() {
+		m.logger.Infof("Device %s is not an NVIDIA GPU or NVSwitch", device)
 		return nil
 	}
 
