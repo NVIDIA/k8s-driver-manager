@@ -796,9 +796,13 @@ func (dm *DriverManager) unmountRootfs() error {
 }
 
 // If vfio-pci driver is in use, ensure we unbind it from all devices.
-// If vfio-pci driver is not in use, and we have reached this point, all devices will not be bound to any driver,
-// so the below unbind operation will be a no-op.
+// In VFIO workload mode (vm-passthrough), skip unneccsary unbind.
 func (dm *DriverManager) unbindVfioPCI() error {
+	if dm.isVFIOWorkloadConfig() {
+		dm.log.Info("VFIO workload mode, skipping vfio-pci unbind")
+		return nil
+	}
+
 	dm.log.Info("Unbinding vfio-pci driver from all devices")
 	cmd := exec.Command("vfio-manage", "unbind", "--all")
 	return cmd.Run()
@@ -952,4 +956,9 @@ func (dm *DriverManager) cleanupOnFailure() {
 	if err := dm.rescheduleGPUOperatorComponents(); err != nil {
 		dm.log.Warnf("Failed to reschedule GPU operator components during cleanup: %v", err)
 	}
+}
+
+func (dm *DriverManager) isVFIOWorkloadConfig() bool {
+	workloadConfig := os.Getenv("GPU_WORKLOAD_CONFIG")
+	return workloadConfig == "vm-passthrough"
 }
