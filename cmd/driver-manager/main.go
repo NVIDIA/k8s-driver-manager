@@ -906,7 +906,7 @@ func (dm *DriverManager) maybeSetTrue(currentValue string) string {
 
 func (dm *DriverManager) isAutoDrainEnabled() bool {
 	if dm.isDriverAutoUpgradePolicyEnabled() {
-		dm.log.Info("Auto drain of the node is disabled by the upgrade policy")
+		dm.log.Info(autoDrainSupersededByPolicyMsg)
 		return false
 	}
 	return dm.config.enableAutoDrain
@@ -914,7 +914,7 @@ func (dm *DriverManager) isAutoDrainEnabled() bool {
 
 func (dm *DriverManager) isGPUPodEvictionEnabled() bool {
 	if dm.isDriverAutoUpgradePolicyEnabled() {
-		dm.log.Infof("Auto eviction of GPU pods on node %s is disabled by the upgrade policy", dm.config.nodeName)
+		dm.log.Info(gpuPodEvictionSupersededByPolicyMsg)
 		return false
 	}
 	return dm.config.enableGPUPodEviction
@@ -942,11 +942,18 @@ func (dm *DriverManager) isDriverAutoUpgradePolicyEnabled() bool {
 
 func (dm *DriverManager) cleanupOnFailure() {
 	dm.log.Info("Performing cleanup on failure")
+	policyEnabled := dm.isDriverAutoUpgradePolicyEnabled()
+	managerCanEvict := !policyEnabled && (dm.config.enableGPUPodEviction || dm.config.enableAutoDrain)
 
-	if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
+	switch {
+	case managerCanEvict:
 		if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
 			dm.log.Warnf("Failed to uncordon node during cleanup: %v", err)
 		}
+	case policyEnabled:
+		dm.log.Warnf(cleanupGuidancePolicyEnabledMsg, dm.config.nodeName, dm.config.nodeName)
+	default:
+		dm.log.Warnf(cleanupGuidanceFeaturesDisabledMsg, dm.config.nodeName)
 	}
 
 	if err := dm.rescheduleGPUOperatorComponents(); err != nil {
