@@ -312,7 +312,7 @@ func (dm *DriverManager) uninstallDriver() error {
 		dm.removePIDFile()
 
 		if err := dm.rescheduleGPUOperatorComponents(); err != nil {
-			dm.log.Warnf("Failed to reschedule GPU operator components: %v", err)
+			return fmt.Errorf("failed to reschedule GPU operator components: %w", err)
 		}
 		return nil
 	}

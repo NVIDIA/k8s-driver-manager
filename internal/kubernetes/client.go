@@ -108,7 +108,14 @@ func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string)
 		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
-	return retry.OnError(retry.DefaultBackoff, func(err error) bool {
+	backoff := wait.Backoff{
+		Duration: time.Second,
+		Factor:   2.0,
+		Jitter:   0.2,
+		Steps:    7,
+	}
+
+	return retry.OnError(backoff, func(err error) bool {
 		return true
 	}, func() error {
 		_, err := c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
