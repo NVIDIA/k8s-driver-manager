@@ -33,6 +33,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/NVIDIA/k8s-driver-manager/internal/info"
 	kube "github.com/NVIDIA/k8s-driver-manager/internal/kubernetes"
@@ -62,6 +63,17 @@ const (
 	nvidiaSandboxValidatorDeployLabel    = nvidiaDomainPrefix + "/" + "gpu.deploy.sandbox-validator"
 	nvidiaSandboxDevicePluginDeployLabel = nvidiaDomainPrefix + "/" + "gpu.deploy.sandbox-device-plugin"
 	nvidiaVGPUDeviceManagerDeployLabel   = nvidiaDomainPrefix + "/" + "gpu.deploy.vgpu-device-manager"
+
+	nvidiaGPUClientAnnotation = nvidiaDomainPrefix + "/" + "gpu.client"
+	nvidiaTaintKey            = nvidiaDomainPrefix + "/" + "gpu-driver-update"
+)
+
+var (
+	driverManagerTaint = corev1.Taint{
+		Key:    nvidiaTaintKey,
+		Value:  "k8s-driver-manager",
+		Effect: corev1.TaintEffectNoSchedule,
+	}
 )
 
 // Configuration holds all the configuration from environment variables
@@ -289,6 +301,15 @@ func (dm *DriverManager) uninstallDriver() error {
 	if err := dm.fetchAutoUpgradeAnnotation(); err != nil {
 		return fmt.Errorf("failed to fetch auto upgrade annotation: %w", err)
 	}
+
+	if err := dm.kubeClient.TaintNode(driverManagerTaint, dm.config.nodeName); err != nil {
+		return fmt.Errorf("failed to taint Node %q: %w", dm.config.nodeName, err)
+	}
+	defer func() {
+		if err := dm.kubeClient.UntaintNode(driverManagerTaint, dm.config.nodeName); err != nil {
+			dm.log.Warnf("Failed to untaint Node %q: %v", dm.config.nodeName, err)
+		}
+	}()
 
 	// Always evict all GPU operator components across a driver restart
 	if err := dm.evictAllGPUOperatorComponents(); err != nil {
@@ -650,6 +671,27 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 		}
 	}
 
+	dm.log.Info("Checking if there are additional gpu clients that need to be restarted...")
+
+	gpuClientPods, err := dm.kubeClient.ListPodsOnNodeWithAnnotation(nvidiaGPUClientAnnotation, nodeName)
+	if err != nil {
+		dm.log.Errorf("Failed to list the gpu client pods: %v", err)
+		return err
+	}
+
+	if len(gpuClientPods) > 0 {
+		dm.log.Info("Found extra gpu-client pods that need to be reset")
+
+		for _, pod := range gpuClientPods {
+			dm.log.Infof("Waiting for pod %s/%s to shutdown", pod.Namespace, pod.Name)
+
+			if err = dm.kubeClient.EvictPodWithWait(pod.Name, pod.Namespace, defaultGracePeriod); err != nil {
+				dm.log.Errorf("Failed while evicting pod %s/%s and waiting for shutdown: %v", pod.Namespace, pod.Name, err)
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -958,5 +1000,10 @@ func (dm *DriverManager) cleanupOnFailure() {
 
 	if err := dm.rescheduleGPUOperatorComponents(); err != nil {
 		dm.log.Warnf("Failed to reschedule GPU operator components during cleanup: %v", err)
+	}
+
+	// Ensure that the taint previously applied is removed during cleanup
+	if err := dm.kubeClient.UntaintNode(driverManagerTaint, dm.config.nodeName); err != nil {
+		dm.log.Warnf("Failed to untaint Node %q: %v", dm.config.nodeName, err)
 	}
 }
