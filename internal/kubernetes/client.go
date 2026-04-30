@@ -25,7 +25,10 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -84,7 +87,7 @@ func NewClient(ctx context.Context, kubeconfig string, log *logrus.Logger) (*Cli
 func (c *Client) GetNodeLabelValue(nodeName, label string) (string, error) {
 	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("failed to get node %s: %w", nodeName, err)
+		return "", fmt.Errorf("failed to get node %q: %w", nodeName, err)
 	}
 
 	if node.Labels == nil {
@@ -108,22 +111,7 @@ func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string)
 		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
-	backoff := wait.Backoff{
-		Duration: time.Second,
-		Factor:   2.0,
-		Jitter:   0.2,
-		Steps:    7,
-	}
-
-	return retry.OnError(backoff, func(err error) bool {
-		return true
-	}, func() error {
-		_, err := c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
-		if err != nil {
-			c.log.Warnf("Failed to update labels on node %s, retrying: %v", nodeName, err)
-		}
-		return err
-	})
+	return c.patchNodeWithRetry(nodeName, patchBytes, types.StrategicMergePatchType)
 }
 
 // GetNodeAnnotationValue returns the annotation value given a node name and annotation key
@@ -144,7 +132,7 @@ func (c *Client) CordonNode(nodeName string) error {
 
 	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+		return fmt.Errorf("failed to get node %q: %w", nodeName, err)
 	}
 
 	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
@@ -157,11 +145,57 @@ func (c *Client) UncordonNode(nodeName string) error {
 
 	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+		return fmt.Errorf("failed to get node %q: %w", nodeName, err)
 	}
 
 	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
 	return drain.RunCordonOrUncordon(drainHelper, node, false)
+}
+
+// TaintNode applies a taint on a Node marking it as Unschedulable. If the taint already exists, it skips updating
+// the node
+func (c *Client) TaintNode(taint corev1.Taint, nodeName string) error {
+	c.log.Infof("Tainting node %s", nodeName)
+
+	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get node %q: %w", nodeName, err)
+	}
+
+	original := node.DeepCopy()
+
+	// First, we check if the taint already exists. If yes, we skip the node patch operation
+	for _, nodeTaint := range node.Spec.Taints {
+		if taintsEqual(nodeTaint, taint) {
+			c.log.Infof("Taint has already been applied. Skipping node taint...")
+			return nil
+		}
+	}
+
+	node.Spec.Taints = append(node.Spec.Taints, taint)
+
+	return c.applyNodeDiff(original, node)
+}
+
+// UntaintNode removes the taint on a Node. If the taint doesn't exist, it skips updating the node.
+func (c *Client) UntaintNode(taint corev1.Taint, nodeName string) error {
+	c.log.Infof("Untainting node %s", nodeName)
+
+	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get node %q: %w", nodeName, err)
+	}
+
+	original := node.DeepCopy()
+
+	for i, nodeTaint := range node.Spec.Taints {
+		if taintsEqual(nodeTaint, taint) {
+			node.Spec.Taints = append(node.Spec.Taints[:i], node.Spec.Taints[i+1:]...)
+			return c.applyNodeDiff(original, node)
+		}
+	}
+	c.log.Infof("Taint not found. Skipping node untaint...")
+	return nil
 }
 
 // WaitForPodTermination will wait for the termination of pods matching labels from the selectorMap on the node with the specified namespace.
@@ -180,6 +214,48 @@ func (c *Client) WaitForPodTermination(selectorMap map[string]string, namespace,
 
 		// Return true if no pods are found (all terminated)
 		return len(pods.Items) == 0, nil
+	})
+}
+
+// ListPodsOnNodeWithAnnotation will list all pods matching a specified annotation on a node
+func (c *Client) ListPodsOnNodeWithAnnotation(annotationKey string, nodeName string) ([]corev1.Pod, error) {
+
+	podList, err := c.clientset.CoreV1().Pods(corev1.NamespaceAll).List(c.ctx, metav1.ListOptions{
+		FieldSelector: "spec.nodeName=" + nodeName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result []corev1.Pod
+	for _, pod := range podList.Items {
+		if _, exists := pod.Annotations[annotationKey]; exists {
+			result = append(result, pod)
+		}
+	}
+	return result, nil
+}
+
+// EvictPodWithWait will evict a pod with the name "podName" and return after confirmation of successful pod deletion
+func (c *Client) EvictPodWithWait(podName, namespace string, timeout time.Duration) error {
+	eviction := &policyv1.Eviction{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: namespace,
+		},
+		// Optional: specify DeleteOptions such as grace period
+		DeleteOptions: &metav1.DeleteOptions{},
+	}
+	err := c.clientset.CoreV1().Pods(namespace).EvictV1(c.ctx, eviction)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to evict pod %s/%s: %w", namespace, podName, err)
+	}
+
+	return wait.PollUntilContextTimeout(c.ctx, 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		_, err := c.clientset.CoreV1().Pods(namespace).Get(c.ctx, podName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
 	})
 }
 
@@ -292,4 +368,47 @@ func gpuPodSpecFilter(pod corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+func (c *Client) applyNodeDiff(currentNode *corev1.Node, desiredNode *corev1.Node) error {
+	currentNodeJSON, err := json.Marshal(currentNode)
+	if err != nil {
+		return fmt.Errorf("failed to marshal node object %v: %w", currentNode, err)
+	}
+	desiredNodeJSON, err := json.Marshal(desiredNode)
+	if err != nil {
+		return fmt.Errorf("failed to marshal node object %v: %w", desiredNode, err)
+	}
+
+	patch, err := jsonpatch.CreateMergePatch(currentNodeJSON, desiredNodeJSON)
+	if err != nil {
+		return fmt.Errorf("failed to create merge-patch: %w", err)
+	}
+	return c.patchNodeWithRetry(desiredNode.Name, patch, types.MergePatchType)
+}
+
+func (c *Client) patchNodeWithRetry(nodeName string, patch []byte, patchType types.PatchType) error {
+
+	backoff := wait.Backoff{
+		Duration: time.Second,
+		Factor:   2.0,
+		Jitter:   0.2,
+		Steps:    7,
+	}
+	return retry.OnError(backoff, func(err error) bool {
+		return true
+	}, func() error {
+		_, err := c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, patchType, patch, metav1.PatchOptions{})
+		if err != nil {
+			c.log.Warnf("Failed to patch node %s, retrying: %v", nodeName, err)
+		}
+		return err
+	})
+}
+
+func taintsEqual(t1 corev1.Taint, t2 corev1.Taint) bool {
+	keysEqual := t1.Key == t2.Key
+	valuesEqual := t1.Value == t2.Value
+	effectsEqual := t1.Effect == t2.Effect
+	return keysEqual && valuesEqual && effectsEqual
 }
