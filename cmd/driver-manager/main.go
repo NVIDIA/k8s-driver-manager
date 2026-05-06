@@ -759,7 +759,7 @@ func (dm *DriverManager) unloadDriver() error {
 		if _, err := os.Stat(fmt.Sprintf("/sys/module/%s/refcnt", module)); err == nil {
 			if err := unix.DeleteModule(module, 0); err != nil {
 				dm.log.Warnf("Failed to unload kernel module %s: %v", module, err)
-				moduleErrs = errors.Join(err)
+				moduleErrs = errors.Join(moduleErrs, err)
 			}
 		}
 	}
