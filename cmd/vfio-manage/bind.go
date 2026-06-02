@@ -25,7 +25,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
-	"github.com/NVIDIA/k8s-driver-manager/internal/nvpassthrough"
+	"github.com/NVIDIA/go-nvlib/pkg/nvpassthrough"
 )
 
 type bindCommand struct {
@@ -38,7 +38,7 @@ type bindCommand struct {
 type bindOptions struct {
 	all            bool
 	deviceID       string
-	hostRoot       string
+	libModulesRoot string
 	bindNVSwitches bool
 }
 
@@ -75,17 +75,22 @@ func (m bindCommand) build() *cli.Command {
 				Usage:       "Specific device ID to bind (e.g., 0000:01:00.0)",
 			},
 			&cli.StringFlag{
-				Name:        "host-root",
-				Destination: &m.options.hostRoot,
-				EnvVars:     []string{"HOST_ROOT"},
-				Value:       "/",
-				Usage:       "Path to the host's root filesystem. This is used when loading the vfio-pci module.",
+				Name:    "host-root",
+				EnvVars: []string{"HOST_ROOT"},
+				Usage:   "DEPRECATED: the host root is no longer required to load the vfio-pci module, please use --lib-modules-root instead",
 			},
 			&cli.BoolFlag{
 				Name:        "bind-nvswitches",
 				Destination: &m.options.bindNVSwitches,
 				EnvVars:     []string{"BIND_NVSWITCHES"},
 				Usage:       "Also bind NVSwitches to vfio-pci (default: false)",
+			},
+			&cli.StringFlag{
+				Name:        "lib-modules-root",
+				Destination: &m.options.libModulesRoot,
+				EnvVars:     []string{"LIB_MODULES_ROOT"},
+				Value:       "/lib/modules",
+				Usage:       "Path to the /lib/modules. This is used when loading the vfio-pci module.",
 			},
 		},
 	}
@@ -112,7 +117,9 @@ func (m bindCommand) run() error {
 
 	m.nvpassthrough = nvpassthrough.New(
 		nvpassthrough.WithLogger(m.logger),
-		nvpassthrough.WithHostRoot(m.options.hostRoot),
+		nvpassthrough.WithLibModulesRoot(m.options.libModulesRoot),
+		nvpassthrough.WithNvpciLib(m.nvpci),
+		nvpassthrough.WithLoadKernelModules(true),
 	)
 
 	if m.options.deviceID != "" {
@@ -138,7 +145,7 @@ func (m bindCommand) bindAll() error {
 
 	for _, dev := range devices {
 		m.logger.Infof("Binding device %s", dev.Address)
-		if err := m.nvpassthrough.BindToVFIODriver(dev); err != nil {
+		if err := m.nvpassthrough.BindToVFIODriver(dev.Address); err != nil {
 			m.logger.Warnf("Failed to bind device %s: %v", dev.Address, err)
 		}
 	}
@@ -169,7 +176,7 @@ func (m bindCommand) bindDevice() error {
 
 	m.logger.Infof("Binding device %s", device)
 
-	if err := m.nvpassthrough.BindToVFIODriver(nvdev); err != nil {
+	if err := m.nvpassthrough.BindToVFIODriver(device); err != nil {
 		return fmt.Errorf("failed to bind device %s to vfio driver: %w", device, err)
 	}
 

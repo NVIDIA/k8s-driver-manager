@@ -21,11 +21,10 @@ package main
 import (
 	"fmt"
 
+	"github.com/NVIDIA/go-nvlib/pkg/nvpassthrough"
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
-
-	"github.com/NVIDIA/k8s-driver-manager/internal/nvpassthrough"
 )
 
 type unbindCommand struct {
@@ -43,13 +42,16 @@ type unbindOptions struct {
 
 // newUnbindCommand constructs an unbind command with the specified logger
 func newUnbindCommand(logger *logrus.Logger) *cli.Command {
+	nvpciLib := nvpci.New(
+		nvpci.WithLogger(logger),
+	)
+
 	c := unbindCommand{
 		logger: logger,
-		nvpci: nvpci.New(
-			nvpci.WithLogger(logger),
-		),
+		nvpci:  nvpciLib,
 		nvpassthrough: nvpassthrough.New(
 			nvpassthrough.WithLogger(logger),
+			nvpassthrough.WithNvpciLib(nvpciLib),
 		),
 	}
 	return c.build()
@@ -127,7 +129,7 @@ func (m unbindCommand) unbindAll() error {
 
 	for _, dev := range devices {
 		m.logger.Infof("Unbinding device %s", dev.Address)
-		if err := m.nvpassthrough.UnbindFromDriver(dev); err != nil {
+		if err := m.nvpassthrough.Unbind(dev.Address); err != nil {
 			m.logger.Warnf("Failed to unbind device %s: %v", dev.Address, err)
 		}
 	}
@@ -136,9 +138,7 @@ func (m unbindCommand) unbindAll() error {
 
 func (m unbindCommand) unbindDevice() error {
 	device := m.options.deviceID
-	// Note: Despite its name, GetGPUByPciBusID returns any NVIDIA PCI device
-	// (GPU, NVSwitch, etc.) at the specified address, not just GPUs.
-	nvdev, err := m.nvpci.GetGPUByPciBusID(device)
+	nvdev, err := m.nvpci.GetNvidiaDeviceByPciBusID(device)
 	if err != nil {
 		return fmt.Errorf("failed to get NVIDIA device: %w", err)
 	}
@@ -157,7 +157,7 @@ func (m unbindCommand) unbindDevice() error {
 
 	m.logger.Infof("Unbinding device %s", device)
 
-	if err := m.nvpassthrough.UnbindFromDriver(nvdev); err != nil {
+	if err := m.nvpassthrough.Unbind(device); err != nil {
 		return fmt.Errorf("failed to unbind device %s from driver: %w", device, err)
 	}
 
