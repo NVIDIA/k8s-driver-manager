@@ -369,6 +369,17 @@ func (dm *DriverManager) uninstallDriver() error {
 			}
 		}
 		dm.log.Info("Successfully uninstalled nvidia driver components")
+	} else {
+		// The kernel modules may already be unloaded, but the previous driver
+		// container rootfs can still be mounted at /run/nvidia/driver. If GPU
+		// operands are rescheduled before this stale mount is removed, their
+		// bind mount can stay pinned to the old driver rootfs even after the
+		// replacement driver container mounts the new rootfs.
+		if err := dm.unmountRootfs(); err != nil {
+			dm.cleanupOnFailure()
+			return fmt.Errorf("failed to unmount stale NVIDIA driver rootfs: %w", err)
+		}
+		dm.removePIDFile()
 	}
 
 	// Handle vfio-pci driver unbinding
