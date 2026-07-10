@@ -3,12 +3,12 @@ module github.com/NVIDIA/k8s-driver-manager
 go 1.26.0
 
 require (
-	github.com/NVIDIA/go-nvlib v0.11.0
+	github.com/NVIDIA/go-nvlib v0.12.0
 	github.com/moby/sys/mount v0.3.5
 	github.com/sirupsen/logrus v1.9.4
 	github.com/stretchr/testify v1.11.1
 	github.com/urfave/cli/v2 v2.27.7
-	golang.org/x/sys v0.46.0
+	golang.org/x/sys v0.47.0
 	k8s.io/api v0.36.2
 	k8s.io/apimachinery v0.36.2
 	k8s.io/client-go v0.36.2
