@@ -111,16 +111,7 @@ func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string)
 		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
-	backoff := wait.Backoff{
-		Duration: time.Second,
-		Factor:   2.0,
-		Jitter:   0.2,
-		Steps:    7,
-	}
-
-	return retry.OnError(backoff, func(err error) bool {
-		return true
-	}, func() error {
+	return retryOnAnyError(RetryBackoff(7), func() error {
 		_, err := c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
 		if err != nil {
 			c.log.Warnf("Failed to update labels on node %s, retrying: %v", nodeName, err)
@@ -154,17 +145,34 @@ func (c *Client) CordonNode(nodeName string) error {
 	return drain.RunCordonOrUncordon(drainHelper, node, true)
 }
 
-// UncordonNode uncordons a Node given a Node name marking it as Schedulable
-func (c *Client) UncordonNode(nodeName string) error {
+// RetryBackoff returns the exponential backoff used to retry transient
+// Kubernetes API errors, bounded to the given number of attempts (at least one).
+func RetryBackoff(attempts int) wait.Backoff {
+	if attempts < 1 {
+		attempts = 1
+	}
+	return wait.Backoff{Duration: time.Second, Factor: 2.0, Jitter: 0.2, Steps: attempts}
+}
+
+// retryOnAnyError retries fn on any error using the given backoff.
+func retryOnAnyError(backoff wait.Backoff, fn func() error) error {
+	return retry.OnError(backoff, func(error) bool { return true }, fn)
+}
+
+// UncordonNode uncordons a Node given a Node name marking it as Schedulable.
+// It retries on any error until the backoff budget is exhausted, then returns
+// the last error so a stuck-cordoned node fails loudly instead of silently.
+func (c *Client) UncordonNode(nodeName string, backoff wait.Backoff) error {
 	c.log.Infof("Uncordoning node %s", nodeName)
 
-	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
-	return drain.RunCordonOrUncordon(drainHelper, node, false)
+	return retryOnAnyError(backoff, func() error {
+		node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+		}
+		drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
+		return drain.RunCordonOrUncordon(drainHelper, node, false)
+	})
 }
 
 // WaitForPodTermination will wait for the termination of pods matching labels from the selectorMap on the node with the specified namespace.

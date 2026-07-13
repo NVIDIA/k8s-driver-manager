@@ -40,13 +40,14 @@ import (
 )
 
 const (
-	driverRoot            = "/run/nvidia/driver"
-	driverPIDFile         = "/run/nvidia/nvidia-driver.pid"
-	driverConfigStateFile = "/run/nvidia/nvidia-driver.state"
-	operatorNamespace     = "gpu-operator"
-	pausedStr             = "paused-for-driver-upgrade"
-	defaultDrainTimeout   = time.Second * 0
-	defaultGracePeriod    = 5 * time.Minute
+	driverRoot             = "/run/nvidia/driver"
+	driverPIDFile          = "/run/nvidia/nvidia-driver.pid"
+	driverConfigStateFile  = "/run/nvidia/nvidia-driver.state"
+	operatorNamespace      = "gpu-operator"
+	pausedStr              = "paused-for-driver-upgrade"
+	defaultDrainTimeout    = time.Second * 0
+	defaultGracePeriod     = 5 * time.Minute
+	defaultUncordonRetries = 5
 
 	nvidiaDomainPrefix = "nvidia.com"
 
@@ -402,8 +403,8 @@ func (dm *DriverManager) uninstallDriver() error {
 
 	// Cleanup and reschedule components
 	if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
-		if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
-			dm.log.Warnf("Failed to uncordon node: %v", err)
+		if err := dm.kubeClient.UncordonNode(dm.config.nodeName, kube.RetryBackoff(defaultUncordonRetries)); err != nil {
+			return fmt.Errorf("failed to uncordon node: %w", err)
 		}
 	}
 
@@ -980,7 +981,7 @@ func (dm *DriverManager) cleanupOnFailure() {
 
 	switch {
 	case managerCanEvict:
-		if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
+		if err := dm.kubeClient.UncordonNode(dm.config.nodeName, kube.RetryBackoff(defaultUncordonRetries)); err != nil {
 			dm.log.Warnf("Failed to uncordon node during cleanup: %v", err)
 		}
 	case policyEnabled:
