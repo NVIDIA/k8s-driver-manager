@@ -27,6 +27,7 @@ import (
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -41,6 +42,8 @@ const (
 	nvidiaDomainPrefix       = "nvidia.com"
 	nvidiaResourceNamePrefix = nvidiaDomainPrefix + "/" + "gpu"
 	nvidiaMigResourcePrefix  = nvidiaDomainPrefix + "/" + "mig-"
+
+	kubeClientPollInterval = 5 * time.Second
 )
 
 // Client represents a Kubernetes client wrapper use to perform all the Kubernetes operations required by k8s-driver-manager
@@ -169,10 +172,10 @@ func (c *Client) UncordonNode(nodeName string) error {
 func (c *Client) WaitForPodTermination(selectorMap map[string]string, namespace, nodeName string, timeout time.Duration) error {
 	selector := labels.SelectorFromSet(selectorMap)
 
-	return wait.PollUntilContextTimeout(c.ctx, 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(c.ctx, kubeClientPollInterval, timeout, true, func(ctx context.Context) (bool, error) {
 		pods, err := c.clientset.CoreV1().Pods(namespace).List(c.ctx, metav1.ListOptions{
 			LabelSelector: selector.String(),
-			FieldSelector: "spec.nodeName=" + nodeName,
+			FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
 		})
 		if err != nil {
 			return false, err
@@ -180,6 +183,35 @@ func (c *Client) WaitForPodTermination(selectorMap map[string]string, namespace,
 
 		// Return true if no pods are found (all terminated)
 		return len(pods.Items) == 0, nil
+	})
+}
+
+// WaitForPodsWithNodeSelector waits for all daemon set pods on the given node which has the specified key in
+// its nodeSelector to terminate.
+func (c *Client) WaitForPodsWithNodeSelector(nodeName, nodeSelectorKey string, timeout time.Duration) error {
+	return wait.PollUntilContextTimeout(c.ctx, kubeClientPollInterval, timeout, true, func(ctx context.Context) (bool, error) {
+		podList, err := c.clientset.CoreV1().Pods(corev1.NamespaceAll).List(ctx, metav1.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
+		})
+		if err != nil {
+			return false, fmt.Errorf("failed to list pods on node %s: %w", nodeName, err)
+		}
+
+		matchCount := 0
+		for _, pod := range podList.Items {
+			ownerRef := metav1.GetControllerOf(&pod)
+			if ownerRef == nil || ownerRef.Kind != "DaemonSet" {
+				continue
+			}
+			if _, ok := pod.Spec.NodeSelector[nodeSelectorKey]; ok {
+				matchCount++
+			}
+		}
+
+		if matchCount > 0 {
+			c.log.Infof("Waiting for %d daemon set pod(s) with nodeSelector key %q to terminate", matchCount, nodeSelectorKey)
+		}
+		return matchCount == 0, nil
 	})
 }
 
