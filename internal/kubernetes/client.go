@@ -26,6 +26,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -42,6 +44,7 @@ const (
 	nvidiaDomainPrefix       = "nvidia.com"
 	nvidiaResourceNamePrefix = nvidiaDomainPrefix + "/" + "gpu"
 	nvidiaMigResourcePrefix  = nvidiaDomainPrefix + "/" + "mig-"
+	nvidiaDRADriverName      = "gpu." + nvidiaDomainPrefix
 
 	kubeClientPollInterval = 5 * time.Second
 )
@@ -239,8 +242,11 @@ func (c *Client) DeleteOrEvictPods(nodeName string, drainOpts DrainOptions) erro
 	c.log.Infof("Draining node %s of any GPU pods", nodeName)
 
 	customDrainFilter := func(pod corev1.Pod) drain.PodDeleteStatus {
-		deletePod := gpuPodSpecFilter(pod)
-		if !deletePod {
+		usesGPU, err := c.podUsesGPU(pod)
+		if err != nil {
+			return drain.MakePodDeleteStatusWithError(err.Error())
+		}
+		if !usesGPU {
 			return drain.MakePodDeleteStatusSkip()
 		}
 		return drain.MakePodDeleteStatusOkay()
@@ -274,7 +280,11 @@ func (c *Client) DeleteOrEvictPods(nodeName string, drainOpts DrainOptions) erro
 	// Get number of GPU pods on the node which require deletion
 	numPodsToDelete := 0
 	for _, pod := range podList.Items {
-		if gpuPodSpecFilter(pod) {
+		usesGPU, err := c.podUsesGPU(pod)
+		if err != nil {
+			return fmt.Errorf("failed to check GPU usage for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+		if usesGPU {
 			numPodsToDelete += 1
 		}
 	}
@@ -307,7 +317,10 @@ func (c *Client) DeleteOrEvictPods(nodeName string, drainOpts DrainOptions) erro
 	return nil
 }
 
-func gpuPodSpecFilter(pod corev1.Pod) bool {
+// podUsesGPU reports whether a pod uses NVIDIA GPU resources, either via
+// traditional device-plugin resource requests/limits or via DRA ResourceClaims
+// allocated by the NVIDIA GPU DRA driver.
+func (c *Client) podUsesGPU(pod corev1.Pod) (bool, error) {
 	gpuInResourceList := func(rl corev1.ResourceList) bool {
 		for resourceName := range rl {
 			str := string(resourceName)
@@ -320,6 +333,58 @@ func gpuPodSpecFilter(pod corev1.Pod) bool {
 
 	for _, c := range pod.Spec.Containers {
 		if gpuInResourceList(c.Resources.Limits) || gpuInResourceList(c.Resources.Requests) {
+			return true, nil
+		}
+	}
+
+	return c.podHasGPUResourceClaim(pod)
+}
+
+// podHasGPUResourceClaim reports whether the pod holds a ResourceClaim allocated by
+// the NVIDIA GPU DRA driver. It resolves the name of each claim the pod
+// references and inspects that claim's allocation.
+func (c *Client) podHasGPUResourceClaim(pod corev1.Pod) (bool, error) {
+	for _, claimRef := range pod.Spec.ResourceClaims {
+		claimName := resolveResourceClaimName(pod, claimRef)
+		if claimName == "" {
+			continue
+		}
+		claim, err := c.clientset.ResourceV1().ResourceClaims(pod.Namespace).Get(c.ctx, claimName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return false, fmt.Errorf("failed to get ResourceClaim %s/%s: %w", pod.Namespace, claimName, err)
+		}
+		if isAllocatedNvidiaGPUClaim(claim) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// resolveResourceClaimName returns the name of the ResourceClaim backing a pod's
+// claim reference.
+func resolveResourceClaimName(pod corev1.Pod, claimRef corev1.PodResourceClaim) string {
+	if claimRef.ResourceClaimName != nil {
+		return *claimRef.ResourceClaimName
+	}
+	for _, status := range pod.Status.ResourceClaimStatuses {
+		if status.Name == claimRef.Name && status.ResourceClaimName != nil {
+			return *status.ResourceClaimName
+		}
+	}
+	return ""
+}
+
+// isAllocatedNvidiaGPUClaim reports whether a ResourceClaim has been allocated a
+// device by the NVIDIA GPU DRA driver.
+func isAllocatedNvidiaGPUClaim(claim *resourcev1.ResourceClaim) bool {
+	if claim.Status.Allocation == nil {
+		return false
+	}
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver == nvidiaDRADriverName {
 			return true
 		}
 	}
