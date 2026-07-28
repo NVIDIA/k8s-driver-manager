@@ -296,6 +296,61 @@ func (dm *DriverManager) uninstallDriver() error {
 		return fmt.Errorf("failed to fetch auto upgrade annotation: %w", err)
 	}
 
+	// No driver loaded (node reboot or fresh install): nothing holds the driver, so
+	// skip eviction. Evicting here deadlocks on DRA nodes: terminating a claim-holding
+	// pod needs the kubelet-plugin, which cannot start until the driver install
+	// proceeds.
+	if !dm.isDriverLoaded() {
+		dm.log.Info("No NVIDIA driver loaded, skipping eviction of GPU clients and workloads")
+
+		// Restart the kubelet-plugin: it stays bound to the previous driver rootfs
+		// and would fail to prepare claims against the replacement. Drain it before
+		// unmounting that rootfs so the unmount is not done underneath it.
+		if err := dm.evictKubeletPlugin(); err != nil {
+			return fmt.Errorf("failed to evict DRA kubelet-plugin: %w", err)
+		}
+
+		// Clean up stale artifacts from a previous driver container
+		if err := dm.unmountRootfs(); err != nil {
+			return fmt.Errorf("failed to unmount stale rootfs: %w", err)
+		}
+		dm.removePIDFile()
+
+		// Unload nouveau if present; it blocks the driver install
+		if dm.isNouveauLoaded() {
+			if err := dm.unloadNouveau(); err != nil {
+				return fmt.Errorf("failed to unload nouveau driver: %w", err)
+			}
+			dm.log.Info("Successfully unloaded nouveau driver")
+		}
+
+		// Handle vfio-pci driver unbinding
+		if err := dm.unbindVfioPCI(); err != nil {
+			dm.log.Error("Unable to unbind vfio-pci driver from all devices")
+			return fmt.Errorf("failed to unbind vfio-pci driver: %w", err)
+		}
+
+		// Handle GPUDirect RDMA if enabled
+		// When GPUDirectRDMA is enabled, wait until MOFED driver has finished installing
+		if dm.isGPUDirectRDMAEnabled() {
+			dm.log.Info("GPUDirectRDMA is enabled, validating MOFED driver installation")
+			if err := dm.waitForMofedDriver(); err != nil {
+				return fmt.Errorf("failed to wait for MOFED driver: %w", err)
+			}
+		}
+
+		if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
+			if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
+				dm.log.Warnf("Failed to uncordon node: %v", err)
+			}
+		}
+
+		if err := dm.rescheduleGPUOperatorComponents(); err != nil {
+			return fmt.Errorf("failed to reschedule GPU operator components: %w", err)
+		}
+		return nil
+	}
+
 	// Always evict all GPU operator components across a driver restart. The DRA
 	// kubelet-plugin is the exception: it services NodeUnprepareResources for the
 	// claim-holders evicted here (e.g. dra-validator), so it must outlive them and
