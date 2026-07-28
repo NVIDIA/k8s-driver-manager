@@ -218,6 +218,38 @@ func (c *Client) WaitForPodsWithNodeSelector(nodeName, nodeSelectorKey string, t
 	})
 }
 
+// CheckNoGPUResourceClaimHolders returns an error naming the pods on the node which still
+// hold a ResourceClaim allocated by the NVIDIA GPU DRA driver, i.e. the pods the kubelet
+// still needs the DRA kubelet-plugin to unprepare. Pods in a terminal phase are excluded,
+// since the kubelet has unprepared their claims by then.
+func (c *Client) CheckNoGPUResourceClaimHolders(nodeName string) error {
+	podList, err := c.clientset.CoreV1().Pods(corev1.NamespaceAll).List(c.ctx, metav1.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list pods on node %s: %w", nodeName, err)
+	}
+
+	var holders []string
+	for _, pod := range podList.Items {
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		hasClaim, err := c.podHasGPUResourceClaim(pod)
+		if err != nil {
+			return err
+		}
+		if hasClaim {
+			holders = append(holders, pod.Namespace+"/"+pod.Name)
+		}
+	}
+
+	if len(holders) > 0 {
+		return fmt.Errorf("pod(s) still hold %s resource claims: %s", nvidiaDRADriverName, strings.Join(holders, ", "))
+	}
+	return nil
+}
+
 // DrainNode drains a Node given a Node name and a set of drain option parameters
 func (c *Client) DrainNode(nodeName string, drainOpts DrainOptions) error {
 	c.log.Infof("Draining node %s", nodeName)
