@@ -65,6 +65,8 @@ const (
 	nvidiaGPUClientDeployLabel           = nvidiaDomainPrefix + "/" + "gpu.deploy.client"
 	nvidiaDRADriverDeployLabel           = nvidiaDomainPrefix + "/" + "gpu.deploy.dra-driver"
 	nvidiaDRAValidatorDeployLabel        = nvidiaDomainPrefix + "/" + "gpu.deploy.dra-validator"
+	nvidiaDRADCGMExporterDeployLabel     = nvidiaDomainPrefix + "/" + "gpu.deploy.dcgm-exporter-dra"
+	nvidiaDRADCGMDeployLabel             = nvidiaDomainPrefix + "/" + "gpu.deploy.dcgm-dra"
 )
 
 // Configuration holds all the configuration from environment variables
@@ -99,6 +101,8 @@ type componentState struct {
 	vgpuDeviceManagerDeployed   string
 	draDriverDeployed           string
 	draValidatorDeployed        string
+	draDCGMDeployed             string
+	draDCGMExporterDeployed     string
 	customOperandNodeLabelValue string
 	gpuClientsDeployed          string
 	autoUpgradePolicyEnabled    string
@@ -571,6 +575,8 @@ func (dm *DriverManager) fetchCurrentLabels() error {
 		nvidiaGPUClientDeployLabel,
 		nvidiaDRADriverDeployLabel,
 		nvidiaDRAValidatorDeployLabel,
+		nvidiaDRADCGMDeployLabel,
+		nvidiaDRADCGMExporterDeployLabel,
 	}
 
 	for _, label := range operandLabels {
@@ -627,6 +633,10 @@ func (dm *DriverManager) setComponentState(label, value string) {
 		dm.components.draDriverDeployed = value
 	case nvidiaDRAValidatorDeployLabel:
 		dm.components.draValidatorDeployed = value
+	case nvidiaDRADCGMDeployLabel:
+		dm.components.draDCGMDeployed = value
+	case nvidiaDRADCGMExporterDeployLabel:
+		dm.components.draDCGMExporterDeployed = value
 	}
 }
 
@@ -658,16 +668,13 @@ func (dm *DriverManager) evictAllGPUOperatorComponents() error {
 		nvidiaSandboxValidatorDeployLabel:    dm.maybeSetPaused(dm.components.sandboxValidatorDeployed),
 		nvidiaSandboxDevicePluginDeployLabel: dm.maybeSetPaused(dm.components.sandboxPluginDeployed),
 		nvidiaVGPUDeviceManagerDeployLabel:   dm.maybeSetPaused(dm.components.vgpuDeviceManagerDeployed),
+		nvidiaDRAValidatorDeployLabel:        dm.maybeSetPaused(dm.components.draValidatorDeployed),
+		nvidiaDRADCGMDeployLabel:             dm.maybeSetPaused(dm.components.draDCGMDeployed),
+		nvidiaDRADCGMExporterDeployLabel:     dm.maybeSetPaused(dm.components.draDCGMExporterDeployed),
 	}
 
 	if dm.components.migManagerDeployed != "" {
 		operandLabels[nvidiaMIGManagerDeployLabel] = dm.maybeSetPaused(dm.components.migManagerDeployed)
-	}
-
-	// The dra-validator holds a DRA claim, so it drains here with the other clients. The
-	// kubelet-plugin that services that claim is drained separately, after them.
-	if dm.components.draValidatorDeployed != "" {
-		operandLabels[nvidiaDRAValidatorDeployLabel] = dm.maybeSetPaused(dm.components.draValidatorDeployed)
 	}
 
 	// Handle custom operand node selector label
@@ -746,8 +753,6 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 		{"gpu-feature-discovery", defaultGracePeriod},
 		{"nvidia-dcgm-exporter", defaultGracePeriod},
 		{"nvidia-dcgm", defaultGracePeriod},
-		// The DRA-mode DCGM operands share the gpu.deploy.dcgm* node-selector
-		// labels with the ones above but carry distinct app labels.
 		{"nvidia-dcgm-exporter-dra", defaultGracePeriod},
 		{"nvidia-dcgm-dra", defaultGracePeriod},
 	}
@@ -1044,18 +1049,14 @@ func (dm *DriverManager) rescheduleGPUOperatorComponents() error {
 		nvidiaSandboxValidatorDeployLabel:    dm.maybeSetTrue(dm.components.sandboxValidatorDeployed),
 		nvidiaSandboxDevicePluginDeployLabel: dm.maybeSetTrue(dm.components.sandboxPluginDeployed),
 		nvidiaVGPUDeviceManagerDeployLabel:   dm.maybeSetTrue(dm.components.vgpuDeviceManagerDeployed),
+		nvidiaDRADriverDeployLabel:           dm.maybeSetTrue(dm.components.draDriverDeployed),
+		nvidiaDRAValidatorDeployLabel:        dm.maybeSetTrue(dm.components.draValidatorDeployed),
+		nvidiaDRADCGMDeployLabel:             dm.maybeSetTrue(dm.components.draDCGMDeployed),
+		nvidiaDRADCGMExporterDeployLabel:     dm.maybeSetTrue(dm.components.draDCGMExporterDeployed),
 	}
 
 	if dm.components.migManagerDeployed != "" {
 		operandLabels[nvidiaMIGManagerDeployLabel] = dm.maybeSetTrue(dm.components.migManagerDeployed)
-	}
-
-	if dm.components.draDriverDeployed != "" {
-		operandLabels[nvidiaDRADriverDeployLabel] = dm.maybeSetTrue(dm.components.draDriverDeployed)
-	}
-
-	if dm.components.draValidatorDeployed != "" {
-		operandLabels[nvidiaDRAValidatorDeployLabel] = dm.maybeSetTrue(dm.components.draValidatorDeployed)
 	}
 
 	// Handle custom operand node selector label
