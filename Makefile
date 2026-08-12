@@ -26,7 +26,7 @@ IMAGE_NAME = $(REGISTRY)/k8s-driver-manager
 endif
 
 CHECK_TARGETS := lint
-MAKE_TARGETS := build check fmt lint-internal test check-vendor $(CHECK_TARGETS)
+MAKE_TARGETS := build check fmt lint-internal test check-vendor third-party-notices check-third-party-notices $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS)
 
@@ -52,6 +52,23 @@ goimports:
 
 lint:
 	golangci-lint run ./...
+
+BIN_DIR := $(CURDIR)/bin
+GO_LICENSES := $(BIN_DIR)/go-licenses
+
+$(GO_LICENSES): deployments/devel/go.mod deployments/devel/go.sum
+	cd $(CURDIR)/deployments/devel \
+		&& GOFLAGS=-mod=readonly GOBIN=$(BIN_DIR) go install github.com/google/go-licenses/v2
+
+third-party-notices: $(GO_LICENSES)
+	@bash scripts/generate-third-party-notices.sh
+
+check-third-party-notices: third-party-notices
+	@echo "- Checking if THIRD_PARTY_NOTICES.md is up to date..."
+	@git ls-files --error-unmatch THIRD_PARTY_NOTICES.md >/dev/null 2>&1 \
+		|| { echo "ERROR: THIRD_PARTY_NOTICES.md is not tracked. Run 'make third-party-notices' and commit the result."; exit 1; }
+	@git diff --exit-code -- THIRD_PARTY_NOTICES.md \
+		|| { echo "ERROR: THIRD_PARTY_NOTICES.md is stale. Run 'make third-party-notices' and commit the change."; exit 1; }
 
 COVERAGE_FILE := coverage.out
 test: build

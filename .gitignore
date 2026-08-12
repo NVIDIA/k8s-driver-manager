@@ -1,2 +1,4 @@
 coverage.out
 nvdrain
+/bin/
+/.licenses-cache/
