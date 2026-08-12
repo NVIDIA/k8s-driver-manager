@@ -64,6 +64,7 @@ $(BUILD_TARGETS): build-%:
 		--build-arg GIT_COMMIT="$(GIT_COMMIT)" \
 		--build-arg CVE_UPDATES="$(CVE_UPDATES)" \
 		--build-arg GOPROXY="$(GOPROXY)" \
+		--build-arg BUILD_TIMESTAMP="$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")" \
 		--file $(DOCKERFILE) \
 		$(CURDIR)
 ifeq ($(PUSH_ON_BUILD),true)

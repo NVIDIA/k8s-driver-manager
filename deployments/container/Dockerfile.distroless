@@ -68,6 +68,10 @@ RUN apt-get update \
 
 FROM nvcr.io/nvidia/distroless/cc:v4.0.8
 
+ARG VERSION="unknown"
+ARG GIT_COMMIT="unknown"
+ARG BUILD_TIMESTAMP
+
 USER 0:0
 
 COPY --from=shell /busybox /busybox
@@ -84,6 +88,15 @@ LABEL version="${VERSION}"
 LABEL release="N/A"
 LABEL summary="Manages upgrade of NVIDIA drivers on kubernetes"
 LABEL description="See summary"
+LABEL org.opencontainers.image.base.name="nvcr.io/nvidia/distroless/cc"
+LABEL org.opencontainers.image.created="${BUILD_TIMESTAMP}"
+LABEL org.opencontainers.image.documentation="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator"
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL org.opencontainers.image.source="https://github.com/NVIDIA/k8s-driver-manager.git"
+LABEL org.opencontainers.image.title="NVIDIA Driver Manager For Kubernetes"
+LABEL org.opencontainers.image.url="https://catalog.ngc.nvidia.com/orgs/nvidia/cloud-native/containers/k8s-driver-manager"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+LABEL org.opencontainers.image.version="${VERSION}"
 
 COPY LICENSE /licenses/
 
