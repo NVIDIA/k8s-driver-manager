@@ -190,8 +190,8 @@ collapse_index() {
 }
 
 # In vendor mode go-licenses reports a URL into this repo at HEAD, which stops
-# describing released content once main moves, so append module@version from
-# modules.txt. Longest-prefix match: a license may sit below the module root.
+# describing released content once main moves, so append the dependency path
+# from modules.txt. Longest-prefix match: a license may sit below the module root.
 annotate_modules() {
     awk -v modfile="${MODULES_TXT}" '
         BEGIN {
@@ -201,8 +201,8 @@ annotate_modules() {
                 split(line, f, " ")
                 # "# <path> <version>", optionally "=> <path> <version>" for a
                 # replace. The replacement is what is actually vendored, so it
-                # is what the notices file must name. A filesystem replace has
-                # no version to report, so stop rather than misstate it.
+                # is what the notices file must name. A filesystem replacement
+                # cannot be reliably attributed, so stop rather than misstate it.
                 if (f[4] == "=>" || f[3] == "=>") {
                     r = (f[4] == "=>") ? 5 : 4
                     if (f[r + 1] == "") {
@@ -211,10 +211,10 @@ annotate_modules() {
                         exit 1
                     }
                     mods[++m] = f[2]
-                    disp[f[2]] = f[r] "@" f[r + 1]
+                    disp[f[2]] = f[r]
                 } else {
                     mods[++m] = f[2]
-                    disp[f[2]] = f[2] "@" f[3]
+                    disp[f[2]] = f[2]
                 }
             }
             close(modfile)
@@ -250,7 +250,7 @@ build_index() {
             "Check the entries reported as Unknown before committing the file."
     fi
 
-    # Versions are resolved offline from vendor/modules.txt, so "unknown" here
+    # Dependencies are resolved offline from vendor/modules.txt, so "unknown" here
     # means a package under vendor/ that no module line covers.
     if cut -d, -f4 "${INDEX_FILE}" | LC_ALL=C grep -qx 'unknown'; then
         die "some entries could not be matched to a module in ${MODULES_TXT}." \
@@ -276,8 +276,8 @@ license_files_for() {
 
 emit_index_table() {
     local index="$1" pkg url license module
-    printf '| Package | License | Module |\n'
-    printf '|---------|---------|--------|\n'
+    printf '| Package | License | Dependency |\n'
+    printf '|---------|---------|------------|\n'
 
     while IFS=, read -r pkg url license module; do
         [[ -z "${pkg}" ]] && continue
@@ -291,7 +291,7 @@ emit_sections() {
     local pkg url license module files lf fence
 
     # shellcheck disable=SC2034  # url holds the go-licenses column that
-    # module@version replaces; it is named to keep the field split readable.
+    # dependency path replaces; it is named to keep the field split readable.
     while IFS=, read -r pkg url license module; do
         [[ -z "${pkg}" ]] && continue
 
