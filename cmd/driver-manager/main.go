@@ -390,6 +390,14 @@ func (dm *DriverManager) uninstallDriver() error {
 		// Remove stale PID file from previous container
 		dm.removePIDFile()
 
+		// Release a cordon left behind by an interrupted previous cycle. A no-op when
+		// the previous cycle never cordoned.
+		if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
+			if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
+				dm.log.Warnf("Failed to uncordon node: %v", err)
+			}
+		}
+
 		if err := dm.rescheduleGPUOperatorComponents(); err != nil {
 			return fmt.Errorf("failed to reschedule GPU operator components: %w", err)
 		}
