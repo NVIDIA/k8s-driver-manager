@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,8 @@ const (
 	nvidiaMigResourcePrefix  = nvidiaDomainPrefix + "/" + "mig-"
 	nvidiaDRADriverName      = "gpu." + nvidiaDomainPrefix
 
+	nodeInitialStateAnnotation = nvidiaDomainPrefix + "/" + "driver-manager.node-initial-state.unschedulable"
+
 	kubeClientPollInterval = 5 * time.Second
 )
 
@@ -54,7 +57,7 @@ type Client struct {
 	ctx context.Context
 	log *logrus.Logger
 
-	clientset *kubernetes.Clientset
+	clientset kubernetes.Interface
 }
 
 // DrainOptions represents the option parameters that can passed to the drain.Helper struct
@@ -103,9 +106,97 @@ func (c *Client) GetNodeLabelValue(nodeName, label string) (string, error) {
 // UpdateNodeLabels updates the labels on a Node given a Node name and a string map of label key-value pairs
 // This method uses a strategic merge patch to avoid conflicts with concurrent updates
 func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string) error {
+	labels := make(map[string]interface{}, len(nodeLabels))
+	for key, value := range nodeLabels {
+		labels[key] = value
+	}
+	return c.patchNodeMetadata(nodeName, "labels", labels)
+}
+
+// GetNodeAnnotationValue returns the annotation value given a node name and annotation key
+func (c *Client) GetNodeAnnotationValue(nodeName, annotation string) (string, error) {
+	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+	if node.Annotations == nil {
+		return "", nil
+	}
+	return node.Annotations[annotation], nil
+}
+
+// CordonNode cordons a Node given a Node name marking it as Unschedulable. The node's
+// current schedulable state is first recorded in the nodeInitialStateAnnotation so that
+// UncordonNode can restore it. The annotation is written before the cordon, and a
+// recording is kept only while the node is Unschedulable: a restart after the cordon
+// must not overwrite it, whereas on a schedulable node any recording is stale, since a
+// cycle interrupted after the cordon would have left the node Unschedulable.
+func (c *Client) CordonNode(nodeName string) error {
+	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+
+	value, ok := node.Annotations[nodeInitialStateAnnotation]
+	initialState := strconv.FormatBool(node.Spec.Unschedulable)
+	if !ok || (!node.Spec.Unschedulable && value != initialState) {
+		c.log.Infof("Recording initial state of node %s in annotation %s=%s", nodeName, nodeInitialStateAnnotation, initialState)
+		if err := c.setNodeAnnotation(nodeName, nodeInitialStateAnnotation, initialState); err != nil {
+			return fmt.Errorf("failed to record initial state of node %s: %w", nodeName, err)
+		}
+	}
+
+	c.log.Infof("Cordoning node %s", nodeName)
+	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
+	return drain.RunCordonOrUncordon(drainHelper, node, true)
+}
+
+// UncordonNode restores the schedulable state recorded by CordonNode and removes the
+// nodeInitialStateAnnotation. If the annotation records that the node was already
+// Unschedulable, or if the annotation is absent (CordonNode never acted on the node),
+// the cordon is left in place.
+func (c *Client) UncordonNode(nodeName string) error {
+	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+
+	value, ok := node.Annotations[nodeInitialStateAnnotation]
+	if !ok {
+		c.log.Infof("Annotation %s not present on node %s, node was not cordoned by driver-manager, skipping uncordon", nodeInitialStateAnnotation, nodeName)
+		return nil
+	}
+
+	if value == "true" {
+		c.log.Infof("Node %s was already cordoned before the driver upgrade, skipping uncordon", nodeName)
+	} else {
+		c.log.Infof("Uncordoning node %s", nodeName)
+		drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
+		if err := drain.RunCordonOrUncordon(drainHelper, node, false); err != nil {
+			return err
+		}
+	}
+
+	return c.removeNodeAnnotation(nodeName, nodeInitialStateAnnotation)
+}
+
+// setNodeAnnotation sets an annotation on a Node given a Node name and an annotation key-value pair
+func (c *Client) setNodeAnnotation(nodeName, annotation, value string) error {
+	return c.patchNodeMetadata(nodeName, "annotations", map[string]interface{}{annotation: value})
+}
+
+// removeNodeAnnotation removes an annotation from a Node given a Node name and an annotation key
+func (c *Client) removeNodeAnnotation(nodeName, annotation string) error {
+	return c.patchNodeMetadata(nodeName, "annotations", map[string]interface{}{annotation: nil})
+}
+
+// patchNodeMetadata updates a metadata field (labels or annotations) on a Node, where a
+// nil value removes the key. This method uses a strategic merge patch to avoid conflicts
+// with concurrent updates
+func (c *Client) patchNodeMetadata(nodeName, field string, values map[string]interface{}) error {
 	patch := map[string]interface{}{
 		"metadata": map[string]interface{}{
-			"labels": nodeLabels,
+			field: values,
 		},
 	}
 
@@ -126,48 +217,10 @@ func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string)
 	}, func() error {
 		_, err := c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
 		if err != nil {
-			c.log.Warnf("Failed to update labels on node %s, retrying: %v", nodeName, err)
+			c.log.Warnf("Failed to update %s on node %s, retrying: %v", field, nodeName, err)
 		}
 		return err
 	})
-}
-
-// GetNodeAnnotationValue returns the annotation value given a node name and annotation key
-func (c *Client) GetNodeAnnotationValue(nodeName, annotation string) (string, error) {
-	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-	if node.Annotations == nil {
-		return "", nil
-	}
-	return node.Annotations[annotation], nil
-}
-
-// CordonNode cordons a Node given a Node name marking it as Unschedulable
-func (c *Client) CordonNode(nodeName string) error {
-	c.log.Infof("Cordoning node %s", nodeName)
-
-	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
-	return drain.RunCordonOrUncordon(drainHelper, node, true)
-}
-
-// UncordonNode uncordons a Node given a Node name marking it as Schedulable
-func (c *Client) UncordonNode(nodeName string) error {
-	c.log.Infof("Uncordoning node %s", nodeName)
-
-	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
-	return drain.RunCordonOrUncordon(drainHelper, node, false)
 }
 
 // WaitForPodTermination will wait for the termination of pods matching labels from the selectorMap on the node with the specified namespace.
