@@ -1,0 +1,31 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":disableDependencyDashboard"
+  ],
+  "forkProcessing": "enabled",
+  "ignorePaths": ["vendor/**"],
+  "enabledManagers": ["custom.regex"],
+  "recreateWhen": "always",
+  "pruneStaleBranches": true,
+  "rebaseWhen": "auto",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "deployments/devel/Dockerfile"
+      ],
+      "matchStrings": [
+        "FROM golang:(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "go",
+      "datasourceTemplate": "golang-version",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "labels": [
+    "dependencies",
+    "renovate"
+  ]
+}
