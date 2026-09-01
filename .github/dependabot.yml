@@ -25,11 +25,6 @@ updates:
     schedule:
       interval: "daily"
 
-  - package-ecosystem: "docker"
-    directory: "/deployments/devel"
-    schedule:
-      interval: "daily"
-
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
