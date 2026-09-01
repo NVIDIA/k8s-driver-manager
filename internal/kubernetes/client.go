@@ -35,7 +35,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/retry"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/drain"
 )
@@ -114,19 +113,16 @@ func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string)
 		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
-	backoff := wait.Backoff{
-		Duration: time.Second,
-		Factor:   2.0,
-		Jitter:   0.2,
-		Steps:    7,
-	}
+	backoff := RetryBackoff(7)
+	maxAttempts := backoff.Steps
+	attempt := 0
 
-	return retry.OnError(backoff, func(err error) bool {
-		return true
-	}, func() error {
+	return retryOnAnyError(c.ctx, backoff, func() error {
+		attempt++
+
 		_, err := c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
 		if err != nil {
-			c.log.Warnf("Failed to update labels on node %s, retrying: %v", nodeName, err)
+			c.logFailedAttempt(fmt.Sprintf("update labels on node %s", nodeName), attempt, maxAttempts, err)
 		}
 		return err
 	})
@@ -144,30 +140,99 @@ func (c *Client) GetNodeAnnotationValue(nodeName, annotation string) (string, er
 	return node.Annotations[annotation], nil
 }
 
-// CordonNode cordons a Node given a Node name marking it as Unschedulable
-func (c *Client) CordonNode(nodeName string) error {
+// CordonNode cordons a Node given a Node name marking it as Unschedulable.
+// It retries on any error until the backoff budget is exhausted, then returns
+// the last error.
+func (c *Client) CordonNode(nodeName string, backoff wait.Backoff) error {
 	c.log.Infof("Cordoning node %s", nodeName)
 
-	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
-	return drain.RunCordonOrUncordon(drainHelper, node, true)
+	return c.setNodeCordoned(nodeName, true, backoff)
 }
 
-// UncordonNode uncordons a Node given a Node name marking it as Schedulable
-func (c *Client) UncordonNode(nodeName string) error {
+// UncordonNode uncordons a Node given a Node name marking it as Schedulable.
+// It retries on any error until the backoff budget is exhausted, then returns
+// the last error so a stuck-cordoned node fails loudly instead of silently.
+func (c *Client) UncordonNode(nodeName string, backoff wait.Backoff) error {
 	c.log.Infof("Uncordoning node %s", nodeName)
 
-	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	return c.setNodeCordoned(nodeName, false, backoff)
+}
+
+// setNodeCordoned marks a Node schedulable or unschedulable, retrying on any
+// error using the given backoff. The Node is re-read on every attempt so a
+// retry never patches against a stale object.
+func (c *Client) setNodeCordoned(nodeName string, cordon bool, backoff wait.Backoff) error {
+	verb := "uncordon"
+	if cordon {
+		verb = "cordon"
 	}
 
-	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
-	return drain.RunCordonOrUncordon(drainHelper, node, false)
+	maxAttempts := backoff.Steps
+	attempt := 0
+
+	return retryOnAnyError(c.ctx, backoff, func() error {
+		attempt++
+
+		node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			c.logFailedAttempt(fmt.Sprintf("get node %s to %s it", nodeName, verb), attempt, maxAttempts, err)
+			return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+		}
+
+		drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
+		if err := drain.RunCordonOrUncordon(drainHelper, node, cordon); err != nil {
+			c.logFailedAttempt(fmt.Sprintf("%s node %s", verb, nodeName), attempt, maxAttempts, err)
+			return err
+		}
+		return nil
+	})
+}
+
+// RetryBackoff returns the exponential backoff used to retry transient
+// Kubernetes API errors, bounded to the given number of attempts (at least one).
+func RetryBackoff(attempts int) wait.Backoff {
+	if attempts < 1 {
+		attempts = 1
+	}
+	return wait.Backoff{Duration: time.Second, Factor: 2.0, Jitter: 0.2, Steps: attempts}
+}
+
+// retryOnAnyError retries fn on any error using the given backoff. A cancelled
+// ctx ends the retry loop promptly instead of sleeping out the remaining
+// backoff, and is reported to the caller rather than being reduced to the API
+// error that preceded it, which wait.Interrupted would otherwise conflate.
+func retryOnAnyError(ctx context.Context, backoff wait.Backoff, fn func() error) error {
+	var lastErr error
+
+	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
+		lastErr = fn()
+		return lastErr == nil, nil
+	})
+	if err == nil {
+		return nil
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if lastErr != nil {
+			return fmt.Errorf("%w (last error: %v)", ctxErr, lastErr)
+		}
+		return ctxErr
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return err
+}
+
+// logFailedAttempt reports a failed attempt at action, distinguishing a retry
+// from the attempt that exhausts the budget so the final failure is not
+// misreported as "retrying".
+func (c *Client) logFailedAttempt(action string, attempt, maxAttempts int, err error) {
+	if attempt < maxAttempts {
+		c.log.Warnf("Failed to %s (attempt %d/%d), retrying: %v", action, attempt, maxAttempts, err)
+		return
+	}
+	c.log.Errorf("Failed to %s (attempt %d/%d), giving up: %v", action, attempt, maxAttempts, err)
 }
 
 // WaitForPodTermination will wait for the termination of pods matching labels from the selectorMap on the node with the specified namespace.
