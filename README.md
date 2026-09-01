@@ -9,3 +9,8 @@ The NVIDIA Driver Manager is a Kubernetes component which assist in seamless upg
 6. Uncordon the node.
 
 These steps allows new versions can be easily installed in the Kubernetes cluster.
+
+## Contributions
+[Read the document on contributions](CONTRIBUTING.md). 
+You can contribute by opening a [pull request](https://help.github.com/en/articles/about-pull-requests).
+Contributions must adhere to the [Code of Conduct](CODE_OF_CONDUCT.md).
