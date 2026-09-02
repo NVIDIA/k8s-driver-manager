@@ -34,6 +34,7 @@ const (
 	pciDriversRoot    = pciRootDir + "drivers"
 	vfioPCIDriverName = "vfio-pci"
 	consumerPrefix    = "consumer:pci:"
+	nvidiaVendorID    = "0x10de"
 	libModulesRoot    = "/lib/modules/"
 )
 
@@ -190,25 +191,25 @@ func (n *nvpassthrough) BindToVFIODriver(device *nvpci.NvidiaPCIDevice) error {
 		}
 	}
 
-	// For graphics mode, bind the auxiliary device as well
-	auxDev, err := getGraphicsAuxDev(device)
+	// Bind every other function of the same card. The whole IOMMU group must be bound to a
+	// vfio driver (or to nothing) before VFIO will hand it to a guest.
+	auxDevs, err := getAuxDevices(pciDevicesRoot, device)
 	if err != nil {
-		return fmt.Errorf("failed to get graphics auxiliary device for %s: %w", device.Address, err)
+		return fmt.Errorf("failed to get auxiliary devices for %s: %w", device.Address, err)
 	}
-	if auxDev == nil {
-		return nil
-	}
-	if auxDev.Driver == vfioDriverName {
-		return nil
-	}
+	for _, auxDev := range auxDevs {
+		if auxDev.Driver == vfioDriverName {
+			continue
+		}
 
-	n.logger.Infof("Binding graphics auxiliary device %s to driver: %s", auxDev.Address, vfioDriverName)
+		n.logger.Infof("Binding auxiliary device %s to driver: %s", auxDev.Address, vfioDriverName)
 
-	if err := unbind(auxDev.Address); err != nil {
-		return fmt.Errorf("failed to unbind graphics auxiliary device %s: %w", auxDev.Address, err)
-	}
-	if err := bind(auxDev.Address, vfioDriverName); err != nil {
-		return fmt.Errorf("failed to bind graphics auxiliary device %s to %s: %w", auxDev, vfioDriverName, err)
+		if err := unbind(auxDev.Address); err != nil {
+			return fmt.Errorf("failed to unbind auxiliary device %s: %w", auxDev.Address, err)
+		}
+		if err := bind(auxDev.Address, vfioDriverName); err != nil {
+			return fmt.Errorf("failed to bind auxiliary device %s to %s: %w", auxDev.Address, vfioDriverName, err)
+		}
 	}
 
 	return nil
@@ -222,14 +223,14 @@ func (n *nvpassthrough) UnbindFromDriver(device *nvpci.NvidiaPCIDevice) error {
 		return fmt.Errorf("failed to unbind device %s: %w", device.Address, err)
 	}
 
-	// For graphics mode, unbind the auxiliary device as well
-	auxDev, err := getGraphicsAuxDev(device)
+	// Unbind every other function of the same card, mirroring BindToVFIODriver.
+	auxDevs, err := getAuxDevices(pciDevicesRoot, device)
 	if err != nil {
-		return fmt.Errorf("failed to get graphics auxiliary device for %s: %w", device.Address, err)
+		return fmt.Errorf("failed to get auxiliary devices for %s: %w", device.Address, err)
 	}
-	if auxDev != nil {
+	for _, auxDev := range auxDevs {
 		if err := unbind(auxDev.Address); err != nil {
-			return fmt.Errorf("failed to unbind graphics auxiliary device %s: %w", auxDev.Address, err)
+			return fmt.Errorf("failed to unbind auxiliary device %s: %w", auxDev.Address, err)
 		}
 	}
 
@@ -275,51 +276,98 @@ func unbind(device string) error {
 	return nil
 }
 
-func getGraphicsAuxDev(device *nvpci.NvidiaPCIDevice) (*nvidiaPCIAuxDevice, error) {
-	if device.Class != nvpci.PCIVgaControllerClass {
+// getAuxDevices returns every other PCI function that belongs to the same physical card as
+// device.
+//
+// VFIO assigns an entire IOMMU group to a guest, and refuses the group unless every device in
+// it is bound to a vfio driver or to no driver at all. A discrete NVIDIA GPU is a
+// multi-function PCI device: .0 VGA/3D, .1 HDMI audio, and on Turing-era boards .2
+// (VirtualLink USB xHCI) and .3 (USB-C UCSI). If any of those is left bound to a host driver
+// such as xhci_hcd, the group is not viable and passthrough fails with
+// "vfio: group N is not viable".
+//
+// Functions are discovered two ways, and the results are unioned:
+//
+//   - Sibling PCI functions sharing the same domain:bus:device. This is the only way to find
+//     the VirtualLink xHCI and USB-C UCSI functions, which do not create a device link back
+//     to the GPU.
+//   - "consumer:pci:" device links, which the HDA audio function does create.
+//
+// Siblings are scoped to the physical card rather than to the IOMMU group on purpose: where
+// ACS is unavailable a group can span an entire root port, and unbinding unrelated devices
+// from their drivers would be harmful.
+func getAuxDevices(devicesRoot string, device *nvpci.NvidiaPCIDevice) ([]*nvidiaPCIAuxDevice, error) {
+	if !device.IsGPU() {
 		return nil, nil
 	}
 
-	// Look for consumer symlink
-	entries, err := os.ReadDir(device.Path)
-	if err != nil {
-		return nil, err
+	seen := map[string]bool{device.Address: true}
+	var auxDevs []*nvidiaPCIAuxDevice
+
+	add := func(address string) error {
+		if address == "" || seen[address] {
+			return nil
+		}
+		path := filepath.Join(devicesRoot, address)
+		if _, err := os.Stat(path); err != nil {
+			// The function is not present on this host; there is nothing to bind.
+			return nil
+		}
+		// Auxiliary functions of a GPU are by definition the same vendor. Checking guards
+		// against acting on a device we did not intend to touch.
+		vendor, err := os.ReadFile(filepath.Join(path, "vendor"))
+		if err != nil || strings.TrimSpace(string(vendor)) != nvidiaVendorID {
+			return nil
+		}
+		driver, err := getDriver(path)
+		if err != nil {
+			return fmt.Errorf("failed to get driver for auxiliary device %s: %w", address, err)
+		}
+		seen[address] = true
+		auxDevs = append(auxDevs, &nvidiaPCIAuxDevice{
+			Path:    path,
+			Address: address,
+			Driver:  driver,
+		})
+		return nil
 	}
 
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "consumer") {
-			// Extract aux device name from consumer:pci:XXXX:XX:XX.X format
-			parts := strings.Split(entry.Name(), consumerPrefix)
-			if len(parts) != 2 {
+	// Sibling functions: same domain:bus:device, differing only in function number.
+	if idx := strings.LastIndex(device.Address, "."); idx != -1 {
+		slotPrefix := device.Address[:idx+1]
+		entries, err := os.ReadDir(devicesRoot)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list PCI devices in %s: %w", devicesRoot, err)
+		}
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), slotPrefix) {
 				continue
 			}
-
-			address := parts[1]
-			if address == "" {
-				continue
+			if err := add(entry.Name()); err != nil {
+				return nil, err
 			}
-
-			// Check if aux device exists
-			path := filepath.Join(pciDevicesRoot, address)
-			if _, err := os.Stat(path); err != nil {
-				continue
-			}
-
-			auxDev := &nvidiaPCIAuxDevice{
-				Path:    path,
-				Address: address,
-			}
-
-			driver, err := getDriver(path)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get driver for graphics auxiliary device %s: %w", address, err)
-			}
-			auxDev.Driver = driver
-			return auxDev, nil
 		}
 	}
 
-	return nil, nil
+	// Consumer device links, e.g. the HDA audio function.
+	entries, err := os.ReadDir(device.Path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list %s: %w", device.Path, err)
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "consumer") {
+			continue
+		}
+		parts := strings.Split(entry.Name(), consumerPrefix)
+		if len(parts) != 2 {
+			continue
+		}
+		if err := add(parts[1]); err != nil {
+			return nil, err
+		}
+	}
+
+	return auxDevs, nil
 }
 
 func getDriver(devicePath string) (string, error) {
