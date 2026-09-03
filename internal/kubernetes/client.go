@@ -19,6 +19,7 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -35,7 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/retry"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/drain"
 )
@@ -114,20 +114,8 @@ func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string)
 		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
-	backoff := wait.Backoff{
-		Duration: time.Second,
-		Factor:   2.0,
-		Jitter:   0.2,
-		Steps:    7,
-	}
-
-	return retry.OnError(backoff, func(err error) bool {
-		return true
-	}, func() error {
+	return RetryOnAnyError(c.ctx, c.log, RetryBackoff(7), fmt.Sprintf("update labels on node %s", nodeName), func() error {
 		_, err := c.clientset.CoreV1().Nodes().Patch(c.ctx, nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
-		if err != nil {
-			c.log.Warnf("Failed to update labels on node %s, retrying: %v", nodeName, err)
-		}
 		return err
 	})
 }
@@ -144,30 +132,89 @@ func (c *Client) GetNodeAnnotationValue(nodeName, annotation string) (string, er
 	return node.Annotations[annotation], nil
 }
 
-// CordonNode cordons a Node given a Node name marking it as Unschedulable
+// CordonNode cordons a Node given a Node name marking it as Unschedulable.
+// It makes a single attempt; callers that need to ride out a transient API
+// error wrap it in RetryOnAnyError.
 func (c *Client) CordonNode(nodeName string) error {
 	c.log.Infof("Cordoning node %s", nodeName)
 
-	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
-	return drain.RunCordonOrUncordon(drainHelper, node, true)
+	return c.setNodeCordoned(nodeName, true)
 }
 
-// UncordonNode uncordons a Node given a Node name marking it as Schedulable
+// UncordonNode uncordons a Node given a Node name marking it as Schedulable.
+// It makes a single attempt; callers that need to ride out a transient API
+// error wrap it in RetryOnAnyError.
 func (c *Client) UncordonNode(nodeName string) error {
 	c.log.Infof("Uncordoning node %s", nodeName)
 
+	return c.setNodeCordoned(nodeName, false)
+}
+
+// setNodeCordoned marks a Node schedulable or unschedulable. The Node is read
+// here rather than by the caller, so a retried call always patches a freshly
+// read object instead of a stale one.
+func (c *Client) setNodeCordoned(nodeName string, cordon bool) error {
 	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
 	}
 
 	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
-	return drain.RunCordonOrUncordon(drainHelper, node, false)
+	return drain.RunCordonOrUncordon(drainHelper, node, cordon)
+}
+
+// RetryBackoff returns the exponential backoff used to retry transient
+// Kubernetes API errors, bounded to the given number of attempts (at least one).
+func RetryBackoff(attempts int) wait.Backoff {
+	if attempts < 1 {
+		attempts = 1
+	}
+	return wait.Backoff{Duration: time.Second, Factor: 2.0, Jitter: 0.2, Steps: attempts}
+}
+
+// RetryOnAnyError retries fn on any error using the given backoff, logging each
+// failed attempt at action. A cancelled ctx ends the retry loop promptly
+// instead of sleeping out the remaining backoff, and is joined with the last
+// error rather than being reduced to it, which wait.Interrupted would
+// otherwise conflate.
+func RetryOnAnyError(ctx context.Context, log *logrus.Logger, backoff wait.Backoff, action string, fn func() error) error {
+	maxAttempts := backoff.Steps
+	attempt := 0
+
+	var lastErr error
+
+	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
+		attempt++
+
+		lastErr = fn()
+		if lastErr == nil {
+			return true, nil
+		}
+		logFailedAttempt(log, action, attempt, maxAttempts, lastErr)
+		return false, nil
+	})
+	if err == nil {
+		return nil
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return errors.Join(ctxErr, lastErr)
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return err
+}
+
+// logFailedAttempt reports a failed attempt at action, distinguishing a retry
+// from the attempt that exhausts the budget so the final failure is not
+// misreported as "retrying".
+func logFailedAttempt(log *logrus.Logger, action string, attempt, maxAttempts int, err error) {
+	if attempt < maxAttempts {
+		log.Warnf("Failed to %s (attempt %d/%d), retrying: %v", action, attempt, maxAttempts, err)
+		return
+	}
+	log.Errorf("Failed to %s (attempt %d/%d), giving up: %v", action, attempt, maxAttempts, err)
 }
 
 // WaitForPodTermination will wait for the termination of pods matching labels from the selectorMap on the node with the specified namespace.

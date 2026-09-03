@@ -47,6 +47,10 @@ const (
 	pausedStr             = "paused-for-driver-upgrade"
 	defaultDrainTimeout   = time.Second * 0
 	defaultGracePeriod    = 5 * time.Minute
+	// defaultCordonRetries bounds the retries for the cordon and uncordon calls
+	// that bracket the driver uninstall, so a transient API server error does not
+	// abort an upgrade or leave the node stuck Ready,SchedulingDisabled.
+	defaultCordonRetries = 5
 
 	nvidiaDomainPrefix = "nvidia.com"
 
@@ -344,8 +348,8 @@ func (dm *DriverManager) uninstallDriver() error {
 		}
 
 		if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
-			if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
-				dm.log.Warnf("Failed to uncordon node: %v", err)
+			if err := dm.uncordonNode(); err != nil {
+				return fmt.Errorf("failed to uncordon node: %w", err)
 			}
 		}
 
@@ -407,7 +411,7 @@ func (dm *DriverManager) uninstallDriver() error {
 	// the post-unload auto-drain fallback runs after the kubelet-plugin is gone,
 	// leaving drained claim-holders stuck in Terminating.
 	if dm.isGPUPodEvictionEnabled() || (dm.components.draDriverDeployed != "" && dm.isAutoDrainEnabled()) {
-		if err := dm.kubeClient.CordonNode(dm.config.nodeName); err != nil {
+		if err := dm.cordonNode(); err != nil {
 			return fmt.Errorf("failed to cordon node: %w", err)
 		}
 
@@ -500,8 +504,8 @@ func (dm *DriverManager) uninstallDriver() error {
 
 	// Cleanup and reschedule components
 	if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
-		if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
-			dm.log.Warnf("Failed to uncordon node: %v", err)
+		if err := dm.uncordonNode(); err != nil {
+			return fmt.Errorf("failed to uncordon node: %w", err)
 		}
 	}
 
@@ -1123,6 +1127,21 @@ func (dm *DriverManager) isDriverAutoUpgradePolicyEnabled() bool {
 	return false
 }
 
+// cordonNode and uncordonNode wrap the kube client calls with this command's
+// retry policy. The policy lives here rather than in the client so the client
+// stays a thin wrapper over the Kubernetes API.
+func (dm *DriverManager) cordonNode() error {
+	return kube.RetryOnAnyError(dm.ctx, dm.log, kube.RetryBackoff(defaultCordonRetries),
+		fmt.Sprintf("cordon node %s", dm.config.nodeName),
+		func() error { return dm.kubeClient.CordonNode(dm.config.nodeName) })
+}
+
+func (dm *DriverManager) uncordonNode() error {
+	return kube.RetryOnAnyError(dm.ctx, dm.log, kube.RetryBackoff(defaultCordonRetries),
+		fmt.Sprintf("uncordon node %s", dm.config.nodeName),
+		func() error { return dm.kubeClient.UncordonNode(dm.config.nodeName) })
+}
+
 func (dm *DriverManager) cleanupOnFailure() {
 	dm.log.Info("Performing cleanup on failure")
 	policyEnabled := dm.isDriverAutoUpgradePolicyEnabled()
@@ -1130,7 +1149,7 @@ func (dm *DriverManager) cleanupOnFailure() {
 
 	switch {
 	case managerCanEvict:
-		if err := dm.kubeClient.UncordonNode(dm.config.nodeName); err != nil {
+		if err := dm.uncordonNode(); err != nil {
 			dm.log.Warnf("Failed to uncordon node during cleanup: %v", err)
 		}
 	case policyEnabled:
