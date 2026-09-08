@@ -726,15 +726,15 @@ func (dm *DriverManager) evictKubeletPlugin() error {
 }
 
 func (dm *DriverManager) maybeSetPaused(currentValue string) string {
-	if currentValue == "" {
-		return ""
-	} else if currentValue == "false" {
-		return "false"
-	} else if currentValue == "true" {
-		return pausedStr
-	} else if strings.Contains(currentValue, pausedStr) {
+	switch currentValue {
+	case "", "false":
 		return currentValue
-	} else {
+	case "true":
+		return pausedStr
+	default:
+		if strings.Contains(currentValue, pausedStr) {
+			return currentValue
+		}
 		return currentValue + "_" + pausedStr
 	}
 }

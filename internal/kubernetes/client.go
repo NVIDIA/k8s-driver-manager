@@ -103,8 +103,8 @@ func (c *Client) GetNodeLabelValue(nodeName, label string) (string, error) {
 // UpdateNodeLabels updates the labels on a Node given a Node name and a string map of label key-value pairs
 // This method uses a strategic merge patch to avoid conflicts with concurrent updates
 func (c *Client) UpdateNodeLabels(nodeName string, nodeLabels map[string]string) error {
-	patch := map[string]interface{}{
-		"metadata": map[string]interface{}{
+	patch := map[string]any{
+		"metadata": map[string]any{
 			"labels": nodeLabels,
 		},
 	}
@@ -176,7 +176,7 @@ func (c *Client) WaitForPodTermination(selectorMap map[string]string, namespace,
 	selector := labels.SelectorFromSet(selectorMap)
 
 	return wait.PollUntilContextTimeout(c.ctx, kubeClientPollInterval, timeout, true, func(ctx context.Context) (bool, error) {
-		pods, err := c.clientset.CoreV1().Pods(namespace).List(c.ctx, metav1.ListOptions{
+		pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: selector.String(),
 			FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
 		})

@@ -111,6 +111,7 @@ func (km *KernelModules) List(searchKey string) error {
 }
 
 func (km *KernelModules) Load(module string) error {
+	// #nosec G204 -- exec.Command passes module as a separate argument without shell expansion.
 	cmd := exec.Command("chroot", km.root, "modprobe", module)
 	return cmd.Run()
 }

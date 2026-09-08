@@ -141,8 +141,8 @@ func getKernelVersion() (string, error) {
 func getVFIOAliases(input string) []vfioAlias {
 	var aliases []vfioAlias
 
-	lines := strings.Split(input, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(input, "\n")
+	for line := range lines {
 		line = strings.TrimSpace(line)
 
 		if !strings.HasPrefix(line, vfioPciAliasPrefix) {

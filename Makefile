@@ -50,11 +50,17 @@ goimports:
 	go list -f {{.Dir}} $(MODULE)/... \
 		| xargs goimports -local $(MODULE) -w
 
-lint:
-	golangci-lint run ./...
-
 BIN_DIR := $(CURDIR)/bin
+GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 GO_LICENSES := $(BIN_DIR)/go-licenses
+
+$(GOLANGCI_LINT):
+	$(MKDIR) -p $(BIN_DIR)
+	GOBIN=$(BIN_DIR) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run ./...
 
 $(GO_LICENSES): deployments/devel/go.mod deployments/devel/go.sum
 	cd $(CURDIR)/deployments/devel \
