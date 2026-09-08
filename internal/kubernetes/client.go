@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,8 @@ const (
 	nvidiaMigResourcePrefix  = nvidiaDomainPrefix + "/" + "mig-"
 	nvidiaDRADriverName      = "gpu." + nvidiaDomainPrefix
 
+	nodeInitialUnschedulableAnnotationKey = nvidiaDomainPrefix + "/" + "driver-manager.node-initial-state.unschedulable"
+
 	kubeClientPollInterval = 5 * time.Second
 )
 
@@ -54,7 +57,7 @@ type Client struct {
 	ctx context.Context
 	log *logrus.Logger
 
-	clientset *kubernetes.Clientset
+	clientset kubernetes.Interface
 }
 
 // DrainOptions represents the option parameters that can passed to the drain.Helper struct
@@ -144,30 +147,66 @@ func (c *Client) GetNodeAnnotationValue(nodeName, annotation string) (string, er
 	return node.Annotations[annotation], nil
 }
 
-// CordonNode cordons a Node given a Node name marking it as Unschedulable
+// CordonNode atomically records a Node's initial schedulable state and marks it
+// Unschedulable. An existing recording on an Unschedulable Node is retained so
+// that restarting driver-manager does not lose the initial state.
 func (c *Client) CordonNode(nodeName string) error {
-	c.log.Infof("Cordoning node %s", nodeName)
-
 	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
 	}
 
-	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
-	return drain.RunCordonOrUncordon(drainHelper, node, true)
+	_, recorded := node.Annotations[nodeInitialUnschedulableAnnotationKey]
+	if node.Spec.Unschedulable && recorded {
+		return nil
+	}
+
+	initialState := strconv.FormatBool(node.Spec.Unschedulable)
+	c.log.Infof("Cordoning node %s and recording initial state in annotation %s=%s", nodeName, nodeInitialUnschedulableAnnotationKey, initialState)
+	return c.patchNodeSchedulingState(node, true, initialState)
 }
 
-// UncordonNode uncordons a Node given a Node name marking it as Schedulable
+// UncordonNode atomically marks a Node as schedulable and removes the initial
+// state recording. The recording is not enforced yet, so this preserves the
+// historical behavior of unconditionally uncordoning the Node.
 func (c *Client) UncordonNode(nodeName string) error {
-	c.log.Infof("Uncordoning node %s", nodeName)
-
 	node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
 	}
 
-	drainHelper := &drain.Helper{Ctx: c.ctx, Client: c.clientset}
-	return drain.RunCordonOrUncordon(drainHelper, node, false)
+	_, recorded := node.Annotations[nodeInitialUnschedulableAnnotationKey]
+	if !node.Spec.Unschedulable && !recorded {
+		return nil
+	}
+
+	c.log.Infof("Uncordoning node %s", nodeName)
+	return c.patchNodeSchedulingState(node, false, nil)
+}
+
+func (c *Client) patchNodeSchedulingState(node *corev1.Node, unschedulable bool, annotationValue any) error {
+	patch := map[string]any{
+		"metadata": map[string]any{
+			"resourceVersion": node.ResourceVersion,
+			"annotations": map[string]any{
+				nodeInitialUnschedulableAnnotationKey: annotationValue,
+			},
+		},
+		"spec": map[string]any{
+			"unschedulable": unschedulable,
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("failed to marshal node scheduling state patch: %w", err)
+	}
+
+	_, err = c.clientset.CoreV1().Nodes().Patch(c.ctx, node.Name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		c.log.Warnf("Failed to update scheduling state on node %s: %v", node.Name, err)
+	}
+	return err
 }
 
 // WaitForPodTermination will wait for the termination of pods matching labels from the selectorMap on the node with the specified namespace.
