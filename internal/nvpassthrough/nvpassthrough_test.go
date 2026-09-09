@@ -29,7 +29,7 @@ func newFakePCITree(t *testing.T, funcs []pciFunc, consumerLinksOn string, consu
 	for _, f := range funcs {
 		devPath := filepath.Join(devicesRoot, f.address)
 		require.NoError(t, os.MkdirAll(devPath, 0755))
-		require.NoError(t, os.WriteFile(filepath.Join(devPath, "vendor"), []byte(f.vendor+"\n"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(devPath, "vendor"), []byte(f.vendor+"\n"), 0644)) //nolint:gosec // Match sysfs permissions in an isolated test directory.
 		if f.driver != "" {
 			drvPath := filepath.Join(driversRoot, f.driver)
 			require.NoError(t, os.MkdirAll(drvPath, 0755))
