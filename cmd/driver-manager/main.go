@@ -45,6 +45,7 @@ const (
 	driverRoot            = "/run/nvidia/driver"
 	driverPIDFile         = "/run/nvidia/nvidia-driver.pid"
 	driverConfigStateFile = "/run/nvidia/nvidia-driver.state"
+	validationsDir        = "/run/nvidia/validations"
 	operatorNamespace     = "gpu-operator"
 	pausedStr             = "paused-for-driver-upgrade"
 	draKubeletPluginApp   = "nvidia-dra-driver-kubelet-plugin"
@@ -403,6 +404,8 @@ func (dm *DriverManager) uninstallDriver() error {
 		// Remove stale PID file from previous container
 		dm.removePIDFile()
 
+		dm.invalidateStatusFiles(validationsDir)
+
 		if err := dm.rescheduleGPUOperatorComponents(); err != nil {
 			return fmt.Errorf("failed to reschedule GPU operator components: %w", err)
 		}
@@ -497,6 +500,11 @@ func (dm *DriverManager) uninstallDriver() error {
 		}
 		dm.log.Info("Successfully uninstalled nvidia driver components")
 	} else {
+		// The driver is already unloaded. Remove the status files before the
+		// unmount, so that an unmount failure does not reschedule operands with
+		// stale files.
+		dm.invalidateStatusFiles(validationsDir)
+
 		// The kernel modules may already be unloaded, but the previous driver
 		// container rootfs can still be mounted at /run/nvidia/driver. If GPU
 		// operands are rescheduled before this stale mount is removed, their
@@ -970,6 +978,44 @@ func (dm *DriverManager) removePIDFile() {
 	}
 }
 
+// statusFiles are the readiness files that the validator, sandbox validator,
+// and driver container preStop hooks remove. Markers of components that
+// k8s-driver-manager does not restart, such as .cc-manager-ctr-ready, are not
+// listed. Add a file here when the validator starts writing a new one.
+var statusFiles = []string{
+	// nvidia-operator-validator
+	"driver-ready",
+	"nvidia-fs-ready",
+	"gdrcopy-ready",
+	"nvidia-peermem-ready",
+	"toolkit-ready",
+	"cuda-ready",
+	"plugin-ready",
+	// nvidia-sandbox-validator
+	"cc-manager-ready",
+	"vfio-pci-ready",
+	"vgpu-manager-ready",
+	"host-vgpu-manager-ready",
+	"vgpu-devices-ready",
+	// driver container
+	".driver-ctr-ready",
+	".driver-daemons-status",
+}
+
+// invalidateStatusFiles removes the readiness files that the preStop hooks
+// remove, which does not happen when those containers are removed outside the
+// kubelet.
+func (dm *DriverManager) invalidateStatusFiles(dir string) {
+	dm.log.Infof("Removing status files under %s", dir)
+
+	for _, name := range statusFiles {
+		f := filepath.Join(dir, name)
+		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+			dm.log.Warnf("Failed to remove status file %s: %v", f, err)
+		}
+	}
+}
+
 func (dm *DriverManager) cleanupDriver() error {
 	dm.log.Info("Cleaning up NVIDIA driver")
 
@@ -977,6 +1023,10 @@ func (dm *DriverManager) cleanupDriver() error {
 	if err := dm.unloadDriver(); err != nil {
 		return fmt.Errorf("failed to unload driver: %w", err)
 	}
+
+	// Remove the status files after the unload but before the unmount, so
+	// that an unmount failure does not reschedule operands with stale files.
+	dm.invalidateStatusFiles(validationsDir)
 
 	// Unmount rootfs
 	if err := dm.unmountRootfs(); err != nil {
