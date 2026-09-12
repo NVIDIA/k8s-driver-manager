@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
@@ -49,6 +50,8 @@ type flakyNodeAPI struct {
 	requests      int
 	patches       int
 	unschedulable bool
+	annotations   map[string]string
+	labels        map[string]string
 }
 
 func (f *flakyNodeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -79,26 +82,56 @@ func (f *flakyNodeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// A strategic merge patch clears spec.unschedulable with a null rather
-		// than setting it to false, so key presence is what matters here.
-		var patch map[string]any
-		if err := json.Unmarshal(body, &patch); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if spec, ok := patch["spec"].(map[string]any); ok {
-			if value, present := spec["unschedulable"]; present {
-				cordoned, _ := value.(bool)
-				f.unschedulable = cordoned
+		if r.Method == http.MethodPut {
+			var node corev1.Node
+			if err := json.Unmarshal(body, &node); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			f.unschedulable = node.Spec.Unschedulable
+			f.annotations = node.Annotations
+		} else {
+			// A strategic merge patch clears spec.unschedulable with a null rather
+			// than setting it to false, so key presence is what matters here.
+			var patch map[string]any
+			if err := json.Unmarshal(body, &patch); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if spec, ok := patch["spec"].(map[string]any); ok {
+				if value, present := spec["unschedulable"]; present {
+					cordoned, _ := value.(bool)
+					f.unschedulable = cordoned
+				}
+			}
+			if meta, ok := patch["metadata"].(map[string]any); ok {
+				if ann, ok := meta["annotations"].(map[string]any); ok {
+					if f.annotations == nil {
+						f.annotations = make(map[string]string)
+					}
+					for key, value := range ann {
+						if value == nil {
+							delete(f.annotations, key)
+							continue
+						}
+						if s, ok := value.(string); ok {
+							f.annotations[key] = s
+						}
+					}
+				}
 			}
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	node := &corev1.Node{
-		TypeMeta:   metav1.TypeMeta{Kind: "Node", APIVersion: "v1"},
-		ObjectMeta: metav1.ObjectMeta{Name: f.nodeName},
-		Spec:       corev1.NodeSpec{Unschedulable: f.unschedulable},
+		TypeMeta: metav1.TypeMeta{Kind: "Node", APIVersion: "v1"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        f.nodeName,
+			Annotations: f.annotations,
+			Labels:      f.labels,
+		},
+		Spec: corev1.NodeSpec{Unschedulable: f.unschedulable},
 	}
 	if err := json.NewEncoder(w).Encode(node); err != nil {
 		f.requests-- // the request never completed, do not count it
@@ -117,6 +150,42 @@ func (f *flakyNodeAPI) cordoned() bool {
 	return f.unschedulable
 }
 
+func (f *flakyNodeAPI) annotation(key string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.annotations[key]
+}
+
+func (f *flakyNodeAPI) patchCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.patches
+}
+
+func (f *flakyNodeAPI) setUnschedulable(unschedulable bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unschedulable = unschedulable
+}
+
+func (f *flakyNodeAPI) setAnnotation(key, value string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.annotations == nil {
+		f.annotations = make(map[string]string)
+	}
+	f.annotations[key] = value
+}
+
+func (f *flakyNodeAPI) setLabel(key, value string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.labels == nil {
+		f.labels = make(map[string]string)
+	}
+	f.labels[key] = value
+}
+
 func discardLogger() *logrus.Logger {
 	log := logrus.New()
 	log.SetOutput(io.Discard)
@@ -129,16 +198,15 @@ func newHTTPTestClient(t *testing.T, api *flakyNodeAPI) *Client {
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)
 
-	clientset, err := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+	clientset, err := kubernetes.NewForConfig(&rest.Config{
+		Host: server.URL,
+		ContentConfig: rest.ContentConfig{
+			ContentType: runtime.ContentTypeJSON,
+		},
+	})
 	require.NoError(t, err)
 
 	return &Client{ctx: context.Background(), log: discardLogger(), clientset: clientset}
-}
-
-func (f *flakyNodeAPI) patchCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.patches
 }
 
 // The client makes one attempt per call: the retry policy lives in the
@@ -430,6 +498,343 @@ func TestRecordedStateIsNotEnforced(t *testing.T) {
 			node := getTestNode(t, clientset)
 			require.False(t, node.Spec.Unschedulable)
 			require.NotContains(t, node.Annotations, nodeInitialUnschedulableAnnotationKey)
+		})
+	}
+}
+
+const (
+	testOwnerClaim = "example.com/owner"
+	testPeerClaim  = "example.com/peer"
+)
+
+func TestAcquireNodeCordon(t *testing.T) {
+	tests := []struct {
+		name             string
+		unschedulable    bool
+		annotations      map[string]string
+		labels           map[string]string
+		wantAcquired     bool
+		wantCordoned     bool
+		wantOwner        string
+		wantInitialState string
+		wantPatches      int
+	}{
+		{
+			name:             "claims a schedulable node",
+			wantAcquired:     true,
+			wantCordoned:     true,
+			wantOwner:        "true",
+			wantInitialState: "false",
+			wantPatches:      1,
+		},
+		{
+			name:          "leaves an external cordon unclaimed",
+			unschedulable: true,
+			wantAcquired:  false,
+			wantCordoned:  true,
+			wantPatches:   0,
+		},
+		{
+			name:             "claims a node already recorded by driver-manager",
+			unschedulable:    true,
+			annotations:      map[string]string{nodeInitialUnschedulableAnnotationKey: "false"},
+			wantAcquired:     true,
+			wantCordoned:     true,
+			wantOwner:        "true",
+			wantInitialState: "false",
+			wantPatches:      1,
+		},
+		{
+			name:             "claims a node already claimed by the peer",
+			unschedulable:    true,
+			annotations:      map[string]string{testPeerClaim: "true"},
+			wantAcquired:     true,
+			wantCordoned:     true,
+			wantOwner:        "true",
+			wantInitialState: "true",
+			wantPatches:      1,
+		},
+		{
+			name:          "is a no-op when this component already claimed the cordon",
+			unschedulable: true,
+			annotations: map[string]string{
+				testOwnerClaim:                        "true",
+				nodeInitialUnschedulableAnnotationKey: "false",
+			},
+			wantAcquired:     true,
+			wantCordoned:     true,
+			wantOwner:        "true",
+			wantInitialState: "false",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &flakyNodeAPI{
+				nodeName:      "gpu-node",
+				unschedulable: tt.unschedulable,
+				annotations:   tt.annotations,
+				labels:        tt.labels,
+			}
+			c := newHTTPTestClient(t, api)
+
+			acquired, err := c.AcquireNodeCordon("gpu-node", testOwnerClaim, testPeerClaim)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantAcquired, acquired)
+			require.Equal(t, tt.wantCordoned, api.cordoned())
+			require.Equal(t, tt.wantOwner, api.annotation(testOwnerClaim))
+			require.Equal(t, tt.wantInitialState, api.annotation(nodeInitialUnschedulableAnnotationKey))
+			require.Equal(t, tt.wantPatches, api.patchCount())
+		})
+	}
+}
+
+func TestWaitUntilNoExternalCordonReturnsImmediately(t *testing.T) {
+	tests := []struct {
+		name          string
+		unschedulable bool
+		annotations   map[string]string
+		labels        map[string]string
+	}{
+		{name: "when the node is schedulable"},
+		{
+			name:          "when a GPU component has claimed the cordon",
+			unschedulable: true,
+			annotations:   map[string]string{testOwnerClaim: "true"},
+		},
+		{
+			name:          "when driver-manager recorded initial state",
+			unschedulable: true,
+			annotations:   map[string]string{nodeInitialUnschedulableAnnotationKey: "false"},
+		},
+		{
+			name:          "when the upgrade controller recorded initial state",
+			unschedulable: true,
+			annotations:   map[string]string{gpuUpgradeInitialUnschedulableAnnotationKey: "false"},
+		},
+		{
+			name:          "when the upgrade controller is mid-upgrade",
+			unschedulable: true,
+			labels:        map[string]string{gpuUpgradeStateLabelKey: "pod-restart-required"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &flakyNodeAPI{
+				nodeName:      "gpu-node",
+				unschedulable: tt.unschedulable,
+				annotations:   tt.annotations,
+				labels:        tt.labels,
+			}
+			c := newHTTPTestClient(t, api)
+			c.pollInterval = time.Millisecond
+
+			require.NoError(t, c.WaitUntilNoExternalCordon("gpu-node", testOwnerClaim, testPeerClaim))
+		})
+	}
+}
+
+func TestWaitUntilNoExternalCordonReturnsOnceCleared(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*flakyNodeAPI)
+	}{
+		{
+			name:   "when the node is uncordoned",
+			mutate: func(api *flakyNodeAPI) { api.setUnschedulable(false) },
+		},
+		{
+			name:   "when a GPU claim appears",
+			mutate: func(api *flakyNodeAPI) { api.setAnnotation(testPeerClaim, "true") },
+		},
+		{
+			name:   "when the upgrade controller records initial state",
+			mutate: func(api *flakyNodeAPI) { api.setAnnotation(gpuUpgradeInitialUnschedulableAnnotationKey, "false") },
+		},
+		{
+			name:   "when the upgrade controller enters an in-progress state",
+			mutate: func(api *flakyNodeAPI) { api.setLabel(gpuUpgradeStateLabelKey, "pod-restart-required") },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &flakyNodeAPI{nodeName: "gpu-node", unschedulable: true}
+			c := newHTTPTestClient(t, api)
+			c.pollInterval = time.Millisecond
+
+			done := make(chan error, 1)
+			go func() {
+				done <- c.WaitUntilNoExternalCordon("gpu-node", testOwnerClaim, testPeerClaim)
+			}()
+
+			time.Sleep(20 * time.Millisecond)
+			tt.mutate(api)
+
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for external cordon to clear")
+			}
+		})
+	}
+}
+
+func TestWaitUntilNoExternalCordonStopsWhenContextCancelled(t *testing.T) {
+	api := &flakyNodeAPI{nodeName: "gpu-node", unschedulable: true}
+	c := newHTTPTestClient(t, api)
+	c.pollInterval = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c.ctx = ctx
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.WaitUntilNoExternalCordon("gpu-node", testOwnerClaim, testPeerClaim)
+	}()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cancelled wait to return")
+	}
+}
+
+func TestWaitUntilNoExternalCordonRetriesGetFailures(t *testing.T) {
+	api := &flakyNodeAPI{nodeName: "gpu-node", getFailures: 2}
+	c := newHTTPTestClient(t, api)
+	c.pollInterval = time.Millisecond
+
+	require.NoError(t, c.WaitUntilNoExternalCordon("gpu-node", testOwnerClaim, testPeerClaim))
+}
+
+func TestReleaseNodeCordonPreservesPeerClaim(t *testing.T) {
+	api := &flakyNodeAPI{
+		nodeName:      "gpu-node",
+		unschedulable: true,
+		annotations: map[string]string{
+			testOwnerClaim:                        "true",
+			testPeerClaim:                         "true",
+			nodeInitialUnschedulableAnnotationKey: "false",
+		},
+	}
+	c := newHTTPTestClient(t, api)
+
+	require.NoError(t, c.ReleaseNodeCordon("gpu-node", testOwnerClaim, testPeerClaim))
+	require.True(t, api.cordoned())
+	require.Empty(t, api.annotation(testOwnerClaim))
+	require.Equal(t, "true", api.annotation(testPeerClaim))
+	require.Equal(t, "false", api.annotation(nodeInitialUnschedulableAnnotationKey))
+}
+
+func TestReleaseNodeCordonUncordonsWhenSoleOwner(t *testing.T) {
+	api := &flakyNodeAPI{
+		nodeName:      "gpu-node",
+		unschedulable: true,
+		annotations: map[string]string{
+			testOwnerClaim:                        "true",
+			nodeInitialUnschedulableAnnotationKey: "false",
+		},
+	}
+	c := newHTTPTestClient(t, api)
+
+	require.NoError(t, c.ReleaseNodeCordon("gpu-node", testOwnerClaim, testPeerClaim))
+	require.False(t, api.cordoned())
+	require.Empty(t, api.annotation(testOwnerClaim))
+	require.Empty(t, api.annotation(nodeInitialUnschedulableAnnotationKey))
+}
+
+func TestReleaseNodeCordonPreservesUpgradeControllerOwnership(t *testing.T) {
+	api := &flakyNodeAPI{
+		nodeName:      "gpu-node",
+		unschedulable: true,
+		annotations: map[string]string{
+			testOwnerClaim: "true",
+			gpuUpgradeInitialUnschedulableAnnotationKey: "false",
+		},
+	}
+	c := newHTTPTestClient(t, api)
+
+	require.NoError(t, c.ReleaseNodeCordon("gpu-node", testOwnerClaim, testPeerClaim))
+	require.True(t, api.cordoned())
+	require.Empty(t, api.annotation(testOwnerClaim))
+	require.Equal(t, "false", api.annotation(gpuUpgradeInitialUnschedulableAnnotationKey))
+}
+
+func TestAcquireNodeCordonPatchIsAtomic(t *testing.T) {
+	client, clientset := newTestClient(newTestNode(false, nil))
+
+	acquired, err := client.AcquireNodeCordon(testNodeName, testOwnerClaim, testPeerClaim)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	patches := getNodePatches(t, clientset)
+	require.Len(t, patches, 1)
+	require.Equal(t, true, patches[0]["spec"].(map[string]any)["unschedulable"])
+	metadata := patches[0]["metadata"].(map[string]any)
+	require.Equal(t, "1", metadata["resourceVersion"])
+	annotations := metadata["annotations"].(map[string]any)
+	require.Equal(t, "true", annotations[testOwnerClaim])
+	require.Equal(t, "false", annotations[nodeInitialUnschedulableAnnotationKey])
+
+	node := getTestNode(t, clientset)
+	require.True(t, node.Spec.Unschedulable)
+	require.Equal(t, "true", node.Annotations[testOwnerClaim])
+	require.Equal(t, "false", node.Annotations[nodeInitialUnschedulableAnnotationKey])
+}
+
+func TestGPUCordonClaimed(t *testing.T) {
+	tests := []struct {
+		name        string
+		node        *corev1.Node
+		wantClaimed bool
+		wantPeer    bool
+	}{
+		{name: "nil node"},
+		{
+			name:        "owner claim",
+			node:        &corev1.Node{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{testOwnerClaim: "true"}}},
+			wantClaimed: true,
+		},
+		{
+			name:        "peer claim",
+			node:        &corev1.Node{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{testPeerClaim: "true"}}},
+			wantClaimed: true,
+			wantPeer:    true,
+		},
+		{
+			name:        "driver-manager initial state is a claim but not a remaining peer",
+			node:        &corev1.Node{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{nodeInitialUnschedulableAnnotationKey: "false"}}},
+			wantClaimed: true,
+		},
+		{
+			name:        "upgrade controller initial state",
+			node:        &corev1.Node{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{gpuUpgradeInitialUnschedulableAnnotationKey: "false"}}},
+			wantClaimed: true,
+			wantPeer:    true,
+		},
+		{
+			name:        "upgrade controller mid-upgrade label",
+			node:        &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{gpuUpgradeStateLabelKey: "pod-restart-required"}}},
+			wantClaimed: true,
+			wantPeer:    true,
+		},
+		{
+			name: "upgrade-done is not a claim",
+			node: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{gpuUpgradeStateLabelKey: "upgrade-done"}}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.wantClaimed, gpuCordonClaimed(tt.node, testOwnerClaim, testPeerClaim))
+			require.Equal(t, tt.wantPeer, gpuPeerOwnsCordon(tt.node, testPeerClaim))
 		})
 	}
 }
