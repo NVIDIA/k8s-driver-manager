@@ -88,6 +88,7 @@ type config struct {
 	useHostMofed               bool
 	kubeconfig                 string
 	forceReinstall             bool
+	forceHostDriverUnbind      bool
 }
 
 // ComponentState tracks the deployment state of GPU operator components
@@ -231,6 +232,13 @@ func main() {
 			EnvVars:     []string{"FORCE_REINSTALL"},
 			Value:       false,
 		},
+		&cli.BoolFlag{
+			Name:        "force-host-driver-unbind",
+			Usage:       "Proceed with driver uninstallation when a host NVIDIA driver is detected",
+			Destination: &cfg.forceHostDriverUnbind,
+			EnvVars:     []string{"FORCE_HOST_DRIVER_UNBIND"},
+			Value:       false,
+		},
 	}
 
 	app.Commands = []*cli.Command{
@@ -284,7 +292,8 @@ func (dm *DriverManager) uninstallDriver() error {
 	dm.log.Info("Starting driver uninstallation process")
 
 	// Check if driver is pre-installed on host
-	if dm.isHostDriver() {
+	hostDriverDetected := dm.isHostDriver()
+	if shouldSkipHostDriver(hostDriverDetected, dm.config.forceHostDriverUnbind) {
 		dm.log.Info("NVIDIA GPU driver is already pre-installed on the node, disabling the containerized driver")
 		if err := dm.disableContainerizedDriver(); err != nil {
 			return fmt.Errorf("failed to disable containerized driver: %w", err)
@@ -292,6 +301,9 @@ func (dm *DriverManager) uninstallDriver() error {
 		// Wait for pod termination
 		time.Sleep(60 * time.Second)
 		return fmt.Errorf("driver is pre-installed on host")
+	}
+	if hostDriverDetected {
+		dm.log.Warn("Host NVIDIA driver detected, but FORCE_HOST_DRIVER_UNBIND is set; proceeding with driver uninstallation")
 	}
 
 	// Fetch current component states
@@ -548,6 +560,10 @@ func (dm *DriverManager) isHostDriver() bool {
 		return true
 	}
 	return false
+}
+
+func shouldSkipHostDriver(hostDriverDetected, forceHostDriverUnbind bool) bool {
+	return hostDriverDetected && !forceHostDriverUnbind
 }
 
 func (dm *DriverManager) disableContainerizedDriver() error {
