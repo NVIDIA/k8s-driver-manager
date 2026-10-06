@@ -349,7 +349,7 @@ func (dm *DriverManager) uninstallDriver() error {
 
 		if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
 			if err := dm.uncordonNode(); err != nil {
-				dm.log.Warnf("Failed to uncordon node: %v", err)
+				return fmt.Errorf("failed to uncordon node: %w", err)
 			}
 		}
 
@@ -505,7 +505,7 @@ func (dm *DriverManager) uninstallDriver() error {
 	// Cleanup and reschedule components
 	if dm.isGPUPodEvictionEnabled() || dm.isAutoDrainEnabled() {
 		if err := dm.uncordonNode(); err != nil {
-			dm.log.Warnf("Failed to uncordon node: %v", err)
+			return fmt.Errorf("failed to uncordon node: %w", err)
 		}
 	}
 
