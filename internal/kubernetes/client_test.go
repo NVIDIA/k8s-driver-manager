@@ -19,6 +19,7 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,8 +30,11 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // flakyNodeAPI is a minimal stand-in for the Kubernetes API server that serves a
@@ -119,7 +123,7 @@ func discardLogger() *logrus.Logger {
 	return log
 }
 
-func newTestClient(t *testing.T, api *flakyNodeAPI) *Client {
+func newHTTPTestClient(t *testing.T, api *flakyNodeAPI) *Client {
 	t.Helper()
 
 	server := httptest.NewServer(api)
@@ -141,7 +145,7 @@ func (f *flakyNodeAPI) patchCount() int {
 // driver-manager command, not here.
 func TestCordonNodeCordonsTheNode(t *testing.T) {
 	api := &flakyNodeAPI{nodeName: "gpu-node"}
-	c := newTestClient(t, api)
+	c := newHTTPTestClient(t, api)
 
 	require.NoError(t, c.CordonNode("gpu-node"))
 	require.True(t, api.cordoned())
@@ -152,7 +156,7 @@ func TestCordonNodeCordonsTheNode(t *testing.T) {
 
 func TestUncordonNodeUncordonsTheNode(t *testing.T) {
 	api := &flakyNodeAPI{nodeName: "gpu-node", unschedulable: true}
-	c := newTestClient(t, api)
+	c := newHTTPTestClient(t, api)
 
 	require.NoError(t, c.UncordonNode("gpu-node"))
 	require.False(t, api.cordoned())
@@ -162,7 +166,7 @@ func TestUncordonNodeUncordonsTheNode(t *testing.T) {
 
 func TestCordonNodeReturnsErrorWhenGetFails(t *testing.T) {
 	api := &flakyNodeAPI{nodeName: "gpu-node", getFailures: 1}
-	c := newTestClient(t, api)
+	c := newHTTPTestClient(t, api)
 
 	require.Error(t, c.CordonNode("gpu-node"))
 	require.False(t, api.cordoned())
@@ -171,7 +175,7 @@ func TestCordonNodeReturnsErrorWhenGetFails(t *testing.T) {
 
 func TestCordonNodeReturnsErrorWhenPatchFails(t *testing.T) {
 	api := &flakyNodeAPI{nodeName: "gpu-node", patchFailures: 1}
-	c := newTestClient(t, api)
+	c := newHTTPTestClient(t, api)
 
 	require.Error(t, c.CordonNode("gpu-node"))
 	require.False(t, api.cordoned())
@@ -180,7 +184,7 @@ func TestCordonNodeReturnsErrorWhenPatchFails(t *testing.T) {
 
 func TestUncordonNodeReturnsErrorWhenGetFails(t *testing.T) {
 	api := &flakyNodeAPI{nodeName: "gpu-node", getFailures: 1, unschedulable: true}
-	c := newTestClient(t, api)
+	c := newHTTPTestClient(t, api)
 
 	require.Error(t, c.UncordonNode("gpu-node"))
 	require.True(t, api.cordoned())
@@ -189,9 +193,243 @@ func TestUncordonNodeReturnsErrorWhenGetFails(t *testing.T) {
 
 func TestUncordonNodeReturnsErrorWhenPatchFails(t *testing.T) {
 	api := &flakyNodeAPI{nodeName: "gpu-node", patchFailures: 1, unschedulable: true}
-	c := newTestClient(t, api)
+	c := newHTTPTestClient(t, api)
 
 	require.Error(t, c.UncordonNode("gpu-node"))
 	require.True(t, api.cordoned())
 	require.Equal(t, 1, api.patchCount())
+}
+
+const testNodeName = "test-node"
+
+func newTestClient(node *corev1.Node) (*Client, *fake.Clientset) {
+	clientset := fake.NewSimpleClientset(node)
+	return &Client{
+		ctx:       context.Background(),
+		log:       logrus.New(),
+		clientset: clientset,
+	}, clientset
+}
+
+func newTestNode(unschedulable bool, annotations map[string]string) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            testNodeName,
+			ResourceVersion: "1",
+			Annotations:     annotations,
+		},
+		Spec: corev1.NodeSpec{Unschedulable: unschedulable},
+	}
+}
+
+func getTestNode(t *testing.T, clientset *fake.Clientset) *corev1.Node {
+	t.Helper()
+	node, err := clientset.CoreV1().Nodes().Get(t.Context(), testNodeName, metav1.GetOptions{})
+	require.NoError(t, err)
+	return node
+}
+
+func getNodePatches(t *testing.T, clientset *fake.Clientset) []map[string]any {
+	t.Helper()
+
+	var patches []map[string]any
+	for _, action := range clientset.Actions() {
+		patchAction, ok := action.(k8stesting.PatchAction)
+		if !ok || action.GetResource().Resource != "nodes" {
+			continue
+		}
+
+		var patch map[string]any
+		require.NoError(t, json.Unmarshal(patchAction.GetPatch(), &patch))
+		patches = append(patches, patch)
+	}
+	return patches
+}
+
+func TestCordonUncordonNode(t *testing.T) {
+	testCases := []struct {
+		name          string
+		unschedulable bool
+		annotations   map[string]string
+		cordon        bool
+	}{
+		{
+			name:   "schedulable node is uncordoned",
+			cordon: true,
+		},
+		{
+			name:          "pre-existing cordon is uncordoned",
+			unschedulable: true,
+			cordon:        true,
+		},
+		{
+			name:          "recording survives a restart until uncordon",
+			unschedulable: true,
+			annotations:   map[string]string{nodeInitialUnschedulableAnnotationKey: "false"},
+			cordon:        true,
+		},
+		{
+			name:        "stale recording on schedulable node is replaced",
+			annotations: map[string]string{nodeInitialUnschedulableAnnotationKey: "true"},
+			cordon:      true,
+		},
+		{
+			name:          "external cordon without recording is uncordoned",
+			unschedulable: true,
+		},
+		{
+			name: "schedulable node without recording is unchanged",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, clientset := newTestClient(newTestNode(tc.unschedulable, tc.annotations))
+			if tc.cordon {
+				require.NoError(t, client.CordonNode(testNodeName))
+				require.True(t, getTestNode(t, clientset).Spec.Unschedulable)
+			}
+
+			require.NoError(t, client.UncordonNode(testNodeName))
+			node := getTestNode(t, clientset)
+			require.False(t, node.Spec.Unschedulable)
+			require.NotContains(t, node.Annotations, nodeInitialUnschedulableAnnotationKey)
+		})
+	}
+}
+
+func TestCordonNodeRecordsInitialState(t *testing.T) {
+	testCases := []struct {
+		name               string
+		unschedulable      bool
+		annotations        map[string]string
+		expectedAnnotation string
+		expectedPatches    int
+	}{
+		{
+			name:               "schedulable",
+			expectedAnnotation: "false",
+			expectedPatches:    1,
+		},
+		{
+			name:               "already cordoned",
+			unschedulable:      true,
+			expectedAnnotation: "true",
+			expectedPatches:    1,
+		},
+		{
+			name:               "existing recording is retained while cordoned",
+			unschedulable:      true,
+			annotations:        map[string]string{nodeInitialUnschedulableAnnotationKey: "false"},
+			expectedAnnotation: "false",
+		},
+		{
+			name:               "stale recording is replaced while schedulable",
+			annotations:        map[string]string{nodeInitialUnschedulableAnnotationKey: "true"},
+			expectedAnnotation: "false",
+			expectedPatches:    1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, clientset := newTestClient(newTestNode(tc.unschedulable, tc.annotations))
+			require.NoError(t, client.CordonNode(testNodeName))
+
+			node := getTestNode(t, clientset)
+			require.True(t, node.Spec.Unschedulable)
+			require.Equal(t, tc.expectedAnnotation, node.Annotations[nodeInitialUnschedulableAnnotationKey])
+			require.Len(t, getNodePatches(t, clientset), tc.expectedPatches)
+		})
+	}
+}
+
+func TestNodeSchedulingStatePatchesAreAtomic(t *testing.T) {
+	t.Run("cordon", func(t *testing.T) {
+		client, clientset := newTestClient(newTestNode(false, nil))
+		require.NoError(t, client.CordonNode(testNodeName))
+
+		patches := getNodePatches(t, clientset)
+		require.Len(t, patches, 1)
+		require.Equal(t, true, patches[0]["spec"].(map[string]any)["unschedulable"])
+		metadata := patches[0]["metadata"].(map[string]any)
+		require.Equal(t, "1", metadata["resourceVersion"])
+		require.Equal(t, "false", metadata["annotations"].(map[string]any)[nodeInitialUnschedulableAnnotationKey])
+	})
+
+	t.Run("uncordon", func(t *testing.T) {
+		client, clientset := newTestClient(newTestNode(
+			true,
+			map[string]string{nodeInitialUnschedulableAnnotationKey: "false"},
+		))
+		require.NoError(t, client.UncordonNode(testNodeName))
+
+		patches := getNodePatches(t, clientset)
+		require.Len(t, patches, 1)
+		require.Equal(t, false, patches[0]["spec"].(map[string]any)["unschedulable"])
+		metadata := patches[0]["metadata"].(map[string]any)
+		require.Equal(t, "1", metadata["resourceVersion"])
+		require.Nil(t, metadata["annotations"].(map[string]any)[nodeInitialUnschedulableAnnotationKey])
+	})
+}
+
+func TestNodeSchedulingStatePatchPreservesOtherAnnotations(t *testing.T) {
+	const (
+		existingAnnotation = "example.com/existing"
+		existingValue      = "value"
+	)
+	client, clientset := newTestClient(newTestNode(false, map[string]string{
+		existingAnnotation: existingValue,
+	}))
+
+	require.NoError(t, client.CordonNode(testNodeName))
+	require.NoError(t, client.UncordonNode(testNodeName))
+
+	node := getTestNode(t, clientset)
+	require.Equal(t, existingValue, node.Annotations[existingAnnotation])
+	require.NotContains(t, node.Annotations, nodeInitialUnschedulableAnnotationKey)
+}
+
+func TestUncordonNodePatchFailurePreservesState(t *testing.T) {
+	client, clientset := newTestClient(newTestNode(
+		true,
+		map[string]string{nodeInitialUnschedulableAnnotationKey: "false"},
+	))
+	clientset.PrependReactor("patch", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("patch failed")
+	})
+
+	require.Error(t, client.UncordonNode(testNodeName))
+	node := getTestNode(t, clientset)
+	require.True(t, node.Spec.Unschedulable)
+	require.Equal(t, "false", node.Annotations[nodeInitialUnschedulableAnnotationKey])
+}
+
+func TestRecordedStateIsNotEnforced(t *testing.T) {
+	t.Run("cordon retains existing recording", func(t *testing.T) {
+		client, clientset := newTestClient(newTestNode(
+			true,
+			map[string]string{nodeInitialUnschedulableAnnotationKey: "invalid"},
+		))
+
+		require.NoError(t, client.CordonNode(testNodeName))
+		node := getTestNode(t, clientset)
+		require.True(t, node.Spec.Unschedulable)
+		require.Equal(t, "invalid", node.Annotations[nodeInitialUnschedulableAnnotationKey])
+		require.Empty(t, getNodePatches(t, clientset))
+	})
+
+	for _, recordedState := range []string{"false", "true", "invalid"} {
+		t.Run("uncordon ignores recording "+recordedState, func(t *testing.T) {
+			client, clientset := newTestClient(newTestNode(
+				true,
+				map[string]string{nodeInitialUnschedulableAnnotationKey: recordedState},
+			))
+
+			require.NoError(t, client.UncordonNode(testNodeName))
+			node := getTestNode(t, clientset)
+			require.False(t, node.Spec.Unschedulable)
+			require.NotContains(t, node.Annotations, nodeInitialUnschedulableAnnotationKey)
+		})
+	}
 }
