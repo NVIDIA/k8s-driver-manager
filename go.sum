@@ -4,8 +4,8 @@ github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ
 github.com/MakeNowJust/heredoc v1.0.0/go.mod h1:mG5amYoWBHf8vpLOuehzbGGw0EHxpZZ6lCpQ4fNJ8LE=
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
 github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
-github.com/NVIDIA/go-nvlib v0.12.0 h1:LICVlUGlDnpbwQv64rOZQn11xQae1J+c+dvH9CCi7jc=
-github.com/NVIDIA/go-nvlib v0.12.0/go.mod h1:J5M/QPIJJtaipjdONqevSnfgBlkW49uVWX5cFOoQpoA=
+github.com/NVIDIA/go-nvlib v0.13.0 h1:veqetT7p2m+u7yPVAtXQ/nLAqotTdZF1+RzpLd1Ycis=
+github.com/NVIDIA/go-nvlib v0.13.0/go.mod h1:OmA7IhiBevXA4jUElFQjwmAZJLqrIAofyyn9MvRcz7s=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
 github.com/blang/semver/v4 v4.0.0/go.mod h1:IbckMUScFkM3pff0VJDNKRiT6TG/YpiHIM2yvyW5YoQ=
 github.com/chai2010/gettext-go v1.0.2 h1:1Lwwip6Q2QGsAdl/ZKPCwTe9fe0CjlUbqj5bFNSjIRk=
