@@ -3,7 +3,7 @@ module github.com/NVIDIA/k8s-driver-manager
 go 1.26.0
 
 require (
-	github.com/NVIDIA/go-nvlib v0.12.0
+	github.com/NVIDIA/go-nvlib v0.13.0
 	github.com/moby/sys/mount v0.3.5
 	github.com/sirupsen/logrus v1.10.2
 	github.com/stretchr/testify v1.12.1
