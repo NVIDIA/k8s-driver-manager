@@ -51,7 +51,7 @@ goimports:
 		| xargs goimports -local $(MODULE) -w
 
 BIN_DIR := $(CURDIR)/bin
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.15.0
 GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 GO_LICENSES := $(BIN_DIR)/go-licenses
 
