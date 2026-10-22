@@ -33,6 +33,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/NVIDIA/k8s-driver-manager/internal/info"
 	kube "github.com/NVIDIA/k8s-driver-manager/internal/kubernetes"
@@ -45,6 +47,7 @@ const (
 	driverConfigStateFile = "/run/nvidia/nvidia-driver.state"
 	operatorNamespace     = "gpu-operator"
 	pausedStr             = "paused-for-driver-upgrade"
+	draKubeletPluginApp   = "nvidia-dra-driver-kubelet-plugin"
 	defaultDrainTimeout   = time.Second * 0
 	defaultGracePeriod    = 5 * time.Minute
 	// defaultCordonRetries bounds the retries for the cordon and uncordon calls
@@ -120,6 +123,11 @@ type DriverManager struct {
 	components *componentState
 	kubeClient *kube.Client
 	log        *logrus.Logger
+
+	// podsWaitingForKubeletPlugin holds the UIDs of the terminating GPU claim-holders that
+	// waitForPodsToTerminate stopped waiting for, because no DRA kubelet-plugin pod was
+	// Ready to unprepare their claims.
+	podsWaitingForKubeletPlugin map[types.UID]bool
 }
 
 func main() {
@@ -265,10 +273,11 @@ func main() {
 
 func newDriverManager(ctx context.Context, cfg *config, components *componentState, log *logrus.Logger) (*DriverManager, error) {
 	driverManager := &DriverManager{
-		ctx:        ctx,
-		config:     cfg,
-		components: components,
-		log:        log,
+		ctx:                         ctx,
+		config:                      cfg,
+		components:                  components,
+		log:                         log,
+		podsWaitingForKubeletPlugin: make(map[types.UID]bool),
 	}
 
 	kubeClient, err := kube.NewClient(ctx, cfg.kubeconfig, log)
@@ -431,9 +440,12 @@ func (dm *DriverManager) uninstallDriver() error {
 
 	// The eviction above and the auto-drain fallback below are both disabled when the GPU
 	// Operator's upgrade policy owns the drain, so confirm the claim-holders are gone
-	// rather than assuming it: without the plugin they cannot finish terminating.
+	// rather than assuming it: without the plugin they cannot finish terminating. Skip the
+	// GPU Operator pods that waitForPodsToTerminate stopped waiting for.
 	if dm.components.draDriverDeployed != "" {
-		holders, err := dm.kubeClient.GetGPUResourceClaimHolders(dm.config.nodeName)
+		holders, err := dm.kubeClient.GetGPUResourceClaimHolders(dm.config.nodeName, func(pod corev1.Pod) bool {
+			return dm.podsWaitingForKubeletPlugin[pod.UID]
+		})
 		if err != nil {
 			dm.cleanupOnFailure()
 			return fmt.Errorf("failed to check for GPU resource claim holders: %w", err)
@@ -441,6 +453,17 @@ func (dm *DriverManager) uninstallDriver() error {
 		if len(holders) > 0 {
 			dm.cleanupOnFailure()
 			return fmt.Errorf("cannot drain the DRA kubelet-plugin: pod(s) still hold GPU resource claims: %s", strings.Join(holders, ", "))
+		}
+
+		// An IMEX daemon pod of a ComputeDomain uses all GPUs without a GPU claim, so the
+		// check above does not find it. It stops only after its ComputeDomain workload is
+		// gone, which can be after the eviction above. Wait for it here, while the
+		// kubelet-plugin can still unprepare its claim, because the driver unload fails
+		// while the daemon runs.
+		dm.log.Info("Waiting for ComputeDomain daemon pods to stop")
+		if err := dm.kubeClient.WaitForComputeDomainDaemons(dm.config.nodeName, defaultGracePeriod); err != nil {
+			dm.cleanupOnFailure()
+			return fmt.Errorf("failed to wait for ComputeDomain daemon pods to stop: %w", err)
 		}
 	}
 
@@ -720,13 +743,58 @@ func (dm *DriverManager) evictKubeletPlugin() error {
 
 	dm.log.Info("Waiting for dra-driver to shutdown")
 	selectorMap := map[string]string{
-		"app": "nvidia-dra-driver-kubelet-plugin",
+		"app": draKubeletPluginApp,
 	}
 	if err := dm.kubeClient.WaitForPodTermination(selectorMap, dm.config.operatorNamespace, dm.config.nodeName, defaultGracePeriod); err != nil {
 		dm.log.Errorf("Failed to wait for dra-driver to shutdown: %v", err)
 		return err
 	}
 	return nil
+}
+
+// isWaitingForKubeletPlugin reports whether the pod can finish terminating only after the DRA
+// kubelet-plugin unprepares its GPU ResourceClaim, and no kubelet-plugin pod is Ready.
+// waitForPodsToTerminate does not wait for such a pod, because waiting does not help: a new
+// kubelet-plugin pod starts only after the driver is ready, and this driver-manager must
+// finish first. The kubelet unprepares the claim after the kubelet-plugin starts again, and
+// then the pod finishes terminating. If the gpu.deploy.dra-driver label is false, no
+// kubelet-plugin pod starts, and the pod stays in Terminating until the label is set to true.
+func (dm *DriverManager) isWaitingForKubeletPlugin(pod corev1.Pod) bool {
+	if dm.components.draDriverDeployed == "" {
+		return false
+	}
+	if dm.podsWaitingForKubeletPlugin[pod.UID] {
+		return true
+	}
+
+	waiting, err := dm.kubeClient.IsPodWaitingForGPUClaimUnprepare(pod)
+	if err != nil {
+		dm.log.Warnf("Failed to check whether pod %s/%s waits for its GPU resource claims to be unprepared: %v", pod.Namespace, pod.Name, err)
+		return false
+	}
+	if !waiting {
+		return false
+	}
+
+	selectorMap := map[string]string{
+		"app": draKubeletPluginApp,
+	}
+	pluginReady, err := dm.kubeClient.IsAnyPodReady(selectorMap, dm.config.operatorNamespace, dm.config.nodeName)
+	if err != nil {
+		dm.log.Warnf("Failed to check whether the DRA kubelet-plugin is ready: %v", err)
+		return false
+	}
+	if pluginReady {
+		return false
+	}
+
+	if dm.components.draDriverDeployed == "false" {
+		dm.log.Warnf("Pod %s/%s has stopped and waits for the DRA kubelet-plugin to unprepare its GPU resource claims, but the node label %s is false, so no DRA kubelet-plugin pod will start. Not waiting for this pod: it stays in Terminating until the label is set to true", pod.Namespace, pod.Name, nvidiaDRADriverDeployLabel)
+	} else {
+		dm.log.Warnf("Pod %s/%s has stopped and waits for the DRA kubelet-plugin to unprepare its GPU resource claims, but no DRA kubelet-plugin pod is ready. Not waiting for this pod: the kubelet unprepares the claims after the DRA kubelet-plugin starts again", pod.Namespace, pod.Name)
+	}
+	dm.podsWaitingForKubeletPlugin[pod.UID] = true
+	return true
 }
 
 func (dm *DriverManager) maybeSetPaused(currentValue string) string {
@@ -769,7 +837,7 @@ func (dm *DriverManager) waitForPodsToTerminate() error {
 		selectorMap := map[string]string{
 			"app": selector.app,
 		}
-		if err := dm.kubeClient.WaitForPodTermination(selectorMap, namespace, nodeName, selector.timeout); err != nil {
+		if err := dm.kubeClient.WaitForPodTerminationExcept(selectorMap, namespace, nodeName, selector.timeout, dm.isWaitingForKubeletPlugin); err != nil {
 			dm.log.Errorf("Failed to wait for %s to shutdown: %v", selector.app, err)
 			return err
 		}
@@ -1116,7 +1184,12 @@ func (dm *DriverManager) nvDrainNode() error {
 		PodSelector:        dm.config.drainPodSelectorLabel,
 	}
 
-	return dm.kubeClient.DeleteOrEvictPods(dm.config.nodeName, drainOpts)
+	// Leave out the GPU Operator pods that waitForPodsToTerminate stopped waiting for. They
+	// still hold GPU claims, but they are DaemonSet pods, which the drain helper does not
+	// delete, so counting them makes the drain fail.
+	return dm.kubeClient.DeleteOrEvictPods(dm.config.nodeName, drainOpts, func(pod corev1.Pod) bool {
+		return dm.podsWaitingForKubeletPlugin[pod.UID]
+	})
 }
 
 func (dm *DriverManager) isDriverAutoUpgradePolicyEnabled() bool {

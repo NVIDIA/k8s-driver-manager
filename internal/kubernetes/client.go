@@ -47,6 +47,9 @@ const (
 	nvidiaMigResourcePrefix  = nvidiaDomainPrefix + "/" + "mig-"
 	nvidiaDRADriverName      = "gpu." + nvidiaDomainPrefix
 
+	computeDomainDRADriverName    = "compute-domain." + nvidiaDomainPrefix
+	computeDomainDaemonConfigKind = "ComputeDomainDaemonConfig"
+
 	nodeInitialUnschedulableAnnotationKey = nvidiaDomainPrefix + "/" + "driver-manager.node-initial-state.unschedulable"
 
 	kubeClientPollInterval = 5 * time.Second
@@ -212,6 +215,12 @@ func (c *Client) patchNodeSchedulingState(node *corev1.Node, unschedulable bool,
 // WaitForPodTermination will wait for the termination of pods matching labels from the selectorMap on the node with the specified namespace.
 // It will continue to wait until the specified timeout elapses
 func (c *Client) WaitForPodTermination(selectorMap map[string]string, namespace, nodeName string, timeout time.Duration) error {
+	return c.WaitForPodTerminationExcept(selectorMap, namespace, nodeName, timeout, nil)
+}
+
+// WaitForPodTerminationExcept is WaitForPodTermination, but it does not wait for
+// the pods for which ignore returns true.
+func (c *Client) WaitForPodTerminationExcept(selectorMap map[string]string, namespace, nodeName string, timeout time.Duration, ignore func(corev1.Pod) bool) error {
 	selector := labels.SelectorFromSet(selectorMap)
 
 	return wait.PollUntilContextTimeout(c.ctx, kubeClientPollInterval, timeout, true, func(ctx context.Context) (bool, error) {
@@ -223,9 +232,74 @@ func (c *Client) WaitForPodTermination(selectorMap map[string]string, namespace,
 			return false, err
 		}
 
-		// Return true if no pods are found (all terminated)
-		return len(pods.Items) == 0, nil
+		// Return true if no pods are found (all terminated) or all remaining pods are ignored
+		for _, pod := range pods.Items {
+			if ignore == nil || !ignore(pod) {
+				return false, nil
+			}
+		}
+		return true, nil
 	})
+}
+
+// IsAnyPodReady reports whether a pod matching labels from the selectorMap on the node with
+// the specified namespace is Ready and is not terminating.
+func (c *Client) IsAnyPodReady(selectorMap map[string]string, namespace, nodeName string) (bool, error) {
+	pods, err := c.clientset.CoreV1().Pods(namespace).List(c.ctx, metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(selectorMap).String(),
+		FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to list pods on node %s: %w", nodeName, err)
+	}
+
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp == nil && isPodReady(pod) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// IsPodWaitingForGPUClaimUnprepare reports whether the pod is terminating, none of its
+// containers is running, and it holds a ResourceClaim allocated by the NVIDIA GPU DRA driver.
+// The kubelet stops the containers first, then asks the DRA kubelet-plugin to unprepare the
+// claims, and sets a terminal phase only after that succeeds. The pod status shows the
+// stopped containers only after the kubelet retries a failed unprepare.
+func (c *Client) IsPodWaitingForGPUClaimUnprepare(pod corev1.Pod) (bool, error) {
+	if pod.DeletionTimestamp == nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return false, nil
+	}
+	if hasRunningContainer(pod) {
+		return false, nil
+	}
+	return c.podHasGPUResourceClaim(pod)
+}
+
+func isPodReady(pod corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// hasRunningContainer reports whether the pod status shows a running init, regular, or
+// ephemeral container.
+func hasRunningContainer(pod corev1.Pod) bool {
+	for _, statuses := range [][]corev1.ContainerStatus{
+		pod.Status.InitContainerStatuses,
+		pod.Status.ContainerStatuses,
+		pod.Status.EphemeralContainerStatuses,
+	} {
+		for _, status := range statuses {
+			if status.State.Running != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // WaitForPodsWithNodeSelector waits for all daemon set pods on the given node which has the specified key in
@@ -260,8 +334,9 @@ func (c *Client) WaitForPodsWithNodeSelector(nodeName, nodeSelectorKey string, t
 // GetGPUResourceClaimHolders returns the namespaced names of the pods on the node which
 // still hold a ResourceClaim allocated by the NVIDIA GPU DRA driver, i.e. the pods the
 // kubelet still needs the DRA kubelet-plugin to unprepare. Pods in a terminal phase are
-// excluded, since the kubelet has unprepared their claims by then.
-func (c *Client) GetGPUResourceClaimHolders(nodeName string) ([]string, error) {
+// excluded, since the kubelet has unprepared their claims by then. Pods for which ignore
+// returns true are also excluded.
+func (c *Client) GetGPUResourceClaimHolders(nodeName string, ignore func(corev1.Pod) bool) ([]string, error) {
 	podList, err := c.clientset.CoreV1().Pods(corev1.NamespaceAll).List(c.ctx, metav1.ListOptions{
 		FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
 	})
@@ -274,6 +349,9 @@ func (c *Client) GetGPUResourceClaimHolders(nodeName string) ([]string, error) {
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
+		if ignore != nil && ignore(pod) {
+			continue
+		}
 		hasClaim, err := c.podHasGPUResourceClaim(pod)
 		if err != nil {
 			return nil, err
@@ -284,6 +362,46 @@ func (c *Client) GetGPUResourceClaimHolders(nodeName string) ([]string, error) {
 	}
 
 	return holders, nil
+}
+
+// WaitForComputeDomainDaemons waits until no IMEX daemon pod on the node is running. An IMEX
+// daemon pod holds a ResourceClaim allocated by the NVIDIA ComputeDomain DRA driver with a
+// ComputeDomainDaemonConfig. It gets all GPUs through a CDI spec, not through a GPU claim,
+// and uses the driver while it runs. The DaemonSet controller deletes the daemon pod after
+// the kubelet unprepares the channel claim of the ComputeDomain workload on the node. A
+// terminating daemon pod whose containers have stopped no longer uses the driver, so this
+// function does not wait for it to finish terminating.
+func (c *Client) WaitForComputeDomainDaemons(nodeName string, timeout time.Duration) error {
+	return wait.PollUntilContextTimeout(c.ctx, kubeClientPollInterval, timeout, true, func(ctx context.Context) (bool, error) {
+		podList, err := c.clientset.CoreV1().Pods(corev1.NamespaceAll).List(ctx, metav1.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
+		})
+		if err != nil {
+			return false, fmt.Errorf("failed to list pods on node %s: %w", nodeName, err)
+		}
+
+		var daemons []string
+		for _, pod := range podList.Items {
+			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			if pod.DeletionTimestamp != nil && !hasRunningContainer(pod) {
+				continue
+			}
+			isDaemon, err := c.podHasResourceClaim(pod, isAllocatedComputeDomainDaemonClaim)
+			if err != nil {
+				return false, err
+			}
+			if isDaemon {
+				daemons = append(daemons, pod.Namespace+"/"+pod.Name)
+			}
+		}
+
+		if len(daemons) > 0 {
+			c.log.Infof("Waiting for ComputeDomain daemon pod(s) to stop: %s", strings.Join(daemons, ", "))
+		}
+		return len(daemons) == 0, nil
+	})
 }
 
 // DrainNode drains a Node given a Node name and a set of drain option parameters
@@ -305,11 +423,15 @@ func (c *Client) DrainNode(nodeName string, drainOpts DrainOptions) error {
 	return drain.RunNodeDrain(drainHelper, nodeName)
 }
 
-// DeleteOrEvictPods deletes or evicts the pods on the api server given a Node Name and set of drain option parameters
-func (c *Client) DeleteOrEvictPods(nodeName string, drainOpts DrainOptions) error {
+// DeleteOrEvictPods deletes or evicts the pods on the api server given a Node Name and set of drain option parameters.
+// Pods for which ignore returns true are not counted and not deleted.
+func (c *Client) DeleteOrEvictPods(nodeName string, drainOpts DrainOptions, ignore func(corev1.Pod) bool) error {
 	c.log.Infof("Draining node %s of any GPU pods", nodeName)
 
 	customDrainFilter := func(pod corev1.Pod) drain.PodDeleteStatus {
+		if ignore != nil && ignore(pod) {
+			return drain.MakePodDeleteStatusSkip()
+		}
 		usesGPU, err := c.podUsesGPU(pod)
 		if err != nil {
 			return drain.MakePodDeleteStatusWithError(err.Error())
@@ -348,6 +470,9 @@ func (c *Client) DeleteOrEvictPods(nodeName string, drainOpts DrainOptions) erro
 	// Get number of GPU pods on the node which require deletion
 	numPodsToDelete := 0
 	for _, pod := range podList.Items {
+		if ignore != nil && ignore(pod) {
+			continue
+		}
 		usesGPU, err := c.podUsesGPU(pod)
 		if err != nil {
 			return fmt.Errorf("failed to check GPU usage for pod %s/%s: %w", pod.Namespace, pod.Name, err)
@@ -409,9 +534,15 @@ func (c *Client) podUsesGPU(pod corev1.Pod) (bool, error) {
 }
 
 // podHasGPUResourceClaim reports whether the pod holds a ResourceClaim allocated by
-// the NVIDIA GPU DRA driver. It resolves the name of each claim the pod
-// references and inspects that claim's allocation.
+// the NVIDIA GPU DRA driver.
 func (c *Client) podHasGPUResourceClaim(pod corev1.Pod) (bool, error) {
+	return c.podHasResourceClaim(pod, isAllocatedNvidiaGPUClaim)
+}
+
+// podHasResourceClaim reports whether the pod holds a ResourceClaim for which match
+// returns true. It resolves the name of each claim the pod references and inspects
+// that claim.
+func (c *Client) podHasResourceClaim(pod corev1.Pod, match func(*resourcev1.ResourceClaim) bool) (bool, error) {
 	for _, claimRef := range pod.Spec.ResourceClaims {
 		claimName := resolveResourceClaimName(pod, claimRef)
 		if claimName == "" {
@@ -424,7 +555,7 @@ func (c *Client) podHasGPUResourceClaim(pod corev1.Pod) (bool, error) {
 			}
 			return false, fmt.Errorf("failed to get ResourceClaim %s/%s: %w", pod.Namespace, claimName, err)
 		}
-		if isAllocatedNvidiaGPUClaim(claim) {
+		if match(claim) {
 			return true, nil
 		}
 	}
@@ -453,6 +584,38 @@ func isAllocatedNvidiaGPUClaim(claim *resourcev1.ResourceClaim) bool {
 	}
 	for _, result := range claim.Status.Allocation.Devices.Results {
 		if result.Driver == nvidiaDRADriverName {
+			return true
+		}
+	}
+	return false
+}
+
+// isAllocatedComputeDomainDaemonClaim reports whether a ResourceClaim has been allocated
+// a device by the NVIDIA ComputeDomain DRA driver for an IMEX daemon. To identify a
+// ComputeDomain Daemon claim, we need to check if the kind is ComputeDomainDaemonConfig.
+func isAllocatedComputeDomainDaemonClaim(claim *resourcev1.ResourceClaim) bool {
+	if claim.Status.Allocation == nil {
+		return false
+	}
+	allocated := false
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver == computeDomainDRADriverName {
+			allocated = true
+			break
+		}
+	}
+	if !allocated {
+		return false
+	}
+	for _, config := range claim.Status.Allocation.Devices.Config {
+		if config.Opaque == nil || config.Opaque.Driver != computeDomainDRADriverName {
+			continue
+		}
+		var typeMeta metav1.TypeMeta
+		if err := json.Unmarshal(config.Opaque.Parameters.Raw, &typeMeta); err != nil {
+			continue
+		}
+		if typeMeta.Kind == computeDomainDaemonConfigKind {
 			return true
 		}
 	}
