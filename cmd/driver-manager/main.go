@@ -43,6 +43,7 @@ const (
 	driverRoot            = "/run/nvidia/driver"
 	driverPIDFile         = "/run/nvidia/nvidia-driver.pid"
 	driverConfigStateFile = "/run/nvidia/nvidia-driver.state"
+	validationsDir        = "/run/nvidia/validations"
 	operatorNamespace     = "gpu-operator"
 	pausedStr             = "paused-for-driver-upgrade"
 	defaultDrainTimeout   = time.Second * 0
@@ -394,6 +395,8 @@ func (dm *DriverManager) uninstallDriver() error {
 		// Remove stale PID file from previous container
 		dm.removePIDFile()
 
+		dm.invalidateStatusFiles(validationsDir)
+
 		if err := dm.rescheduleGPUOperatorComponents(); err != nil {
 			return fmt.Errorf("failed to reschedule GPU operator components: %w", err)
 		}
@@ -485,6 +488,8 @@ func (dm *DriverManager) uninstallDriver() error {
 		}
 		dm.removePIDFile()
 	}
+
+	dm.invalidateStatusFiles(validationsDir)
 
 	// Handle vfio-pci driver unbinding
 	if err := dm.unbindVfioPCI(); err != nil {
@@ -899,6 +904,34 @@ func (dm *DriverManager) unloadNouveau() error {
 func (dm *DriverManager) removePIDFile() {
 	if err := os.Remove(driverPIDFile); err != nil && !os.IsNotExist(err) {
 		dm.log.Warnf("Failed to remove PID file %s: %v", driverPIDFile, err)
+	}
+}
+
+// invalidateStatusFiles removes the readiness files that the validator and
+// driver preStop hooks remove, which does not happen when those containers are
+// removed outside the kubelet. Hidden markers of components that
+// k8s-driver-manager does not restart, such as .cc-manager-ctr-ready, are kept.
+func (dm *DriverManager) invalidateStatusFiles(dir string) {
+	dm.log.Infof("Removing status files under %s", dir)
+
+	matches, err := filepath.Glob(filepath.Join(dir, "*-ready"))
+	if err != nil {
+		dm.log.Warnf("Failed to list status files under %s: %v", dir, err)
+		return
+	}
+	files := []string{
+		filepath.Join(dir, ".driver-ctr-ready"),
+		filepath.Join(dir, ".driver-daemons-status"),
+	}
+	for _, f := range matches {
+		if !strings.HasPrefix(filepath.Base(f), ".") {
+			files = append(files, f)
+		}
+	}
+	for _, f := range files {
+		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+			dm.log.Warnf("Failed to remove status file %s: %v", f, err)
+		}
 	}
 }
 
