@@ -47,7 +47,17 @@ const (
 	nvidiaMigResourcePrefix  = nvidiaDomainPrefix + "/" + "mig-"
 	nvidiaDRADriverName      = "gpu." + nvidiaDomainPrefix
 
+	// Written by CordonNode / AcquireNodeCordon. Presence means a GPU
+	// component already recorded this cordon; the value is the node's
+	// unschedulable state before that recording, not an ownership flag.
 	nodeInitialUnschedulableAnnotationKey = nvidiaDomainPrefix + "/" + "driver-manager.node-initial-state.unschedulable"
+
+	// Published by the GPU Operator upgrade controller (k8s-operator-libs).
+	// The controller does not write gpu-driver-upgrade-controller.node-cordoned;
+	// these are the signals it actually uses while a node is mid-upgrade.
+	gpuUpgradeInitialUnschedulableAnnotationKey = nvidiaDomainPrefix + "/" + "gpu-driver-upgrade.node-initial-state.unschedulable"
+	gpuUpgradeWaitForSafeLoadAnnotationKey      = nvidiaDomainPrefix + "/" + "gpu-driver-upgrade.driver-wait-for-safe-load"
+	gpuUpgradeStateLabelKey                     = nvidiaDomainPrefix + "/" + "gpu-driver-upgrade-state"
 
 	kubeClientPollInterval = 5 * time.Second
 )
@@ -58,6 +68,9 @@ type Client struct {
 	log *logrus.Logger
 
 	clientset kubernetes.Interface
+	// pollInterval is the wait between retries for long-running watches such as
+	// WaitUntilNoExternalCordon. Zero means kubeClientPollInterval.
+	pollInterval time.Duration
 }
 
 // DrainOptions represents the option parameters that can passed to the drain.Helper struct
@@ -147,6 +160,169 @@ func (c *Client) GetNodeAnnotationValue(nodeName, annotation string) (string, er
 	return node.Annotations[annotation], nil
 }
 
+func annotationTrue(annotations map[string]string, key string) bool {
+	return annotations[key] == "true"
+}
+
+func annotationPresent(annotations map[string]string, key string) bool {
+	_, ok := annotations[key]
+	return ok
+}
+
+func gpuUpgradeInProgress(labels map[string]string) bool {
+	switch labels[gpuUpgradeStateLabelKey] {
+	case "cordon-required", "wait-for-jobs-required", "pod-deletion-required",
+		"drain-required", "node-maintenance-required", "post-maintenance-required",
+		"pod-restart-required", "validation-required", "uncordon-required",
+		"upgrade-failed":
+		return true
+	default:
+		return false
+	}
+}
+
+// gpuCordonClaimed reports whether a GPU Operator component already owns the
+// cordon. Dedicated claim annotations are exact "true" markers. The
+// driver-manager and upgrade-controller initial-state keys are presence checks
+// because their values record whether the node was already unschedulable, not
+// who owns it.
+func gpuCordonClaimed(node *corev1.Node, claimAnnotation, peerClaimAnnotation string) bool {
+	if node == nil {
+		return false
+	}
+	annotations := node.Annotations
+	if annotationTrue(annotations, claimAnnotation) || annotationTrue(annotations, peerClaimAnnotation) {
+		return true
+	}
+	if annotationPresent(annotations, nodeInitialUnschedulableAnnotationKey) ||
+		annotationPresent(annotations, gpuUpgradeInitialUnschedulableAnnotationKey) ||
+		annotationPresent(annotations, gpuUpgradeWaitForSafeLoadAnnotationKey) {
+		return true
+	}
+	return gpuUpgradeInProgress(node.Labels)
+}
+
+// gpuPeerOwnsCordon reports whether another GPU component still holds the
+// cordon after this component drops its claim. The driver-manager initial-state
+// recording is excluded because AcquireNodeCordon writes it locally.
+func gpuPeerOwnsCordon(node *corev1.Node, peerClaimAnnotation string) bool {
+	if node == nil {
+		return false
+	}
+	annotations := node.Annotations
+	if annotationTrue(annotations, peerClaimAnnotation) ||
+		annotationPresent(annotations, gpuUpgradeInitialUnschedulableAnnotationKey) ||
+		annotationPresent(annotations, gpuUpgradeWaitForSafeLoadAnnotationKey) {
+		return true
+	}
+	return gpuUpgradeInProgress(node.Labels)
+}
+
+func initialUnschedulableRecording(node *corev1.Node) (string, bool) {
+	_, recorded := node.Annotations[nodeInitialUnschedulableAnnotationKey]
+	if recorded && node.Spec.Unschedulable {
+		return "", false
+	}
+	return strconv.FormatBool(node.Spec.Unschedulable), true
+}
+
+// WaitUntilNoExternalCordon blocks until the node is schedulable or a GPU
+// component has claimed the cordon. The wait is cancelled with c.ctx, matching
+// the init container's lifetime, so an administrator-cordoned node holds
+// uninstall rather than crashlooping.
+func (c *Client) WaitUntilNoExternalCordon(nodeName, claimAnnotation, peerClaimAnnotation string) error {
+	interval := kubeClientPollInterval
+	if c.pollInterval > 0 {
+		interval = c.pollInterval
+	}
+	loggedWaiting := false
+	return wait.PollUntilContextCancel(c.ctx, interval, true, func(ctx context.Context) (bool, error) {
+		node, err := c.clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			c.log.Warnf("Failed to inspect cordon on node %s, retrying: %v", nodeName, err)
+			return false, nil
+		}
+		if !node.Spec.Unschedulable || gpuCordonClaimed(node, claimAnnotation, peerClaimAnnotation) {
+			if loggedWaiting {
+				c.log.Infof("External cordon on node %s has cleared, continuing driver rotation", nodeName)
+			}
+			return true, nil
+		}
+		if !loggedWaiting {
+			c.log.Infof("Node %s is already cordoned by an external actor, waiting until it is uncordoned or a GPU component claims the cordon", nodeName)
+			loggedWaiting = true
+		} else {
+			c.log.Infof("Still waiting for external cordon on node %s to be released", nodeName)
+		}
+		return false, nil
+	})
+}
+
+// AcquireNodeCordon atomically records this component's cordon claim and marks
+// the Node unschedulable. If the Node is already cordoned without a GPU
+// component's claim, it is treated as externally owned and left unchanged.
+func (c *Client) AcquireNodeCordon(nodeName, claimAnnotation, peerClaimAnnotation string) (bool, error) {
+	acquired := false
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		acquired = false
+		node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+		}
+
+		if node.Spec.Unschedulable && !gpuCordonClaimed(node, claimAnnotation, peerClaimAnnotation) {
+			return nil
+		}
+		if node.Spec.Unschedulable && annotationTrue(node.Annotations, claimAnnotation) {
+			acquired = true
+			return nil
+		}
+
+		annotations := map[string]any{
+			claimAnnotation: "true",
+		}
+		if initialState, write := initialUnschedulableRecording(node); write {
+			annotations[nodeInitialUnschedulableAnnotationKey] = initialState
+		}
+		if err := c.patchNodeSchedulingState(node, true, annotations); err != nil {
+			return err
+		}
+		acquired = true
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to acquire cordon claim on node %s: %w", nodeName, err)
+	}
+	return acquired, nil
+}
+
+// ReleaseNodeCordon atomically removes this component's claim. The Node is
+// made schedulable only when no other GPU component still owns the cordon.
+func (c *Client) ReleaseNodeCordon(nodeName, claimAnnotation, peerClaimAnnotation string) error {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		node, err := c.clientset.CoreV1().Nodes().Get(c.ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+		}
+		if !annotationTrue(node.Annotations, claimAnnotation) {
+			return nil
+		}
+
+		annotations := map[string]any{
+			claimAnnotation: nil,
+		}
+		unschedulable := gpuPeerOwnsCordon(node, peerClaimAnnotation)
+		if !unschedulable {
+			annotations[nodeInitialUnschedulableAnnotationKey] = nil
+		}
+		return c.patchNodeSchedulingState(node, unschedulable, annotations)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to release cordon claim on node %s: %w", nodeName, err)
+	}
+	return nil
+}
+
 // CordonNode atomically records a Node's initial schedulable state and marks it
 // Unschedulable. An existing recording on an Unschedulable Node is retained so
 // that restarting driver-manager does not lose the initial state.
@@ -156,14 +332,15 @@ func (c *Client) CordonNode(nodeName string) error {
 		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
 	}
 
-	_, recorded := node.Annotations[nodeInitialUnschedulableAnnotationKey]
-	if node.Spec.Unschedulable && recorded {
+	initialState, write := initialUnschedulableRecording(node)
+	if node.Spec.Unschedulable && !write {
 		return nil
 	}
 
-	initialState := strconv.FormatBool(node.Spec.Unschedulable)
 	c.log.Infof("Cordoning node %s and recording initial state in annotation %s=%s", nodeName, nodeInitialUnschedulableAnnotationKey, initialState)
-	return c.patchNodeSchedulingState(node, true, initialState)
+	return c.patchNodeSchedulingState(node, true, map[string]any{
+		nodeInitialUnschedulableAnnotationKey: initialState,
+	})
 }
 
 // UncordonNode atomically marks a Node as schedulable and removes the initial
@@ -181,16 +358,16 @@ func (c *Client) UncordonNode(nodeName string) error {
 	}
 
 	c.log.Infof("Uncordoning node %s", nodeName)
-	return c.patchNodeSchedulingState(node, false, nil)
+	return c.patchNodeSchedulingState(node, false, map[string]any{
+		nodeInitialUnschedulableAnnotationKey: nil,
+	})
 }
 
-func (c *Client) patchNodeSchedulingState(node *corev1.Node, unschedulable bool, annotationValue any) error {
+func (c *Client) patchNodeSchedulingState(node *corev1.Node, unschedulable bool, annotations map[string]any) error {
 	patch := map[string]any{
 		"metadata": map[string]any{
 			"resourceVersion": node.ResourceVersion,
-			"annotations": map[string]any{
-				nodeInitialUnschedulableAnnotationKey: annotationValue,
-			},
+			"annotations":     annotations,
 		},
 		"spec": map[string]any{
 			"unschedulable": unschedulable,
