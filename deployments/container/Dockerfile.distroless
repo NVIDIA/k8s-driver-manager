@@ -66,6 +66,11 @@ RUN apt-get update \
  && cp /bin/busybox /busybox/busybox \
  && /busybox/busybox --install -s /busybox
 
+# Fail the build if busybox prefers applets (CONFIG_FEATURE_PREFER_APPLETS=y).
+# See https://github.com/NVIDIA/k8s-driver-manager/issues/299
+COPY scripts/check-busybox-prefer-applets.sh /tmp/check-busybox-prefer-applets.sh
+RUN /tmp/check-busybox-prefer-applets.sh /busybox/busybox
+
 FROM nvcr.io/nvidia/distroless/cc:v4.1.6
 
 ARG VERSION="unknown"
