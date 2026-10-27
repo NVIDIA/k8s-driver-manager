@@ -20,6 +20,8 @@ package main
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/sirupsen/logrus"
@@ -40,6 +42,8 @@ type bindOptions struct {
 	deviceID       string
 	hostRoot       string
 	bindNVSwitches bool
+
+	additionalVFIOAliases string
 }
 
 // newBindCommand constructs a bind command with the specified logger
@@ -87,6 +91,12 @@ func (m bindCommand) build() *cli.Command {
 				EnvVars:     []string{"BIND_NVSWITCHES"},
 				Usage:       "Also bind NVSwitches to vfio-pci (default: false)",
 			},
+			&cli.StringFlag{
+				Name:        "additional-vfio-aliases",
+				Destination: &m.options.additionalVFIOAliases,
+				EnvVars:     []string{"ADDITIONAL_VFIO_ALIASES"},
+				Usage:       "Comma-separated list of <device-id>=<module> mappings (e.g., 0x2331=nvgrace_gpu_vfio_pci) specifying the VFIO module to bind NVIDIA devices with the given PCI device ID to. These take precedence over modules.alias.",
+			},
 		},
 	}
 
@@ -105,7 +115,37 @@ func (m bindCommand) validateFlags() error {
 	return nil
 }
 
+// parseAdditionalVFIOAliases parses a comma-separated list of
+// <device-id>=<module> entries. The device ID is parsed with base 0, exactly as
+// go-nvlib's nvpci parses the sysfs 'device' attribute, so it should be written
+// with a 0x prefix (e.g. 0x2331); an unprefixed value is interpreted as decimal.
+func parseAdditionalVFIOAliases(input string) (map[uint16]string, error) {
+	aliases := map[uint16]string{}
+	for entry := range strings.SplitSeq(input, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		id, module, found := strings.Cut(entry, "=")
+		id, module = strings.TrimSpace(id), strings.TrimSpace(module)
+		if !found || id == "" || module == "" {
+			return nil, fmt.Errorf("invalid vfio alias %q, expected <device-id>=<module>", entry)
+		}
+		deviceID, err := strconv.ParseUint(id, 0, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid device ID %q in vfio alias %q: %w", id, entry, err)
+		}
+		aliases[uint16(deviceID)] = module
+	}
+	return aliases, nil
+}
+
 func (m bindCommand) run() error {
+	additionalVFIOAliases, err := parseAdditionalVFIOAliases(m.options.additionalVFIOAliases)
+	if err != nil {
+		return fmt.Errorf("failed to parse additional vfio aliases: %w", err)
+	}
+
 	m.nvpci = nvpci.New(
 		nvpci.WithLogger(m.logger),
 	)
@@ -113,6 +153,7 @@ func (m bindCommand) run() error {
 	m.nvpassthrough = nvpassthrough.New(
 		nvpassthrough.WithLogger(m.logger),
 		nvpassthrough.WithHostRoot(m.options.hostRoot),
+		nvpassthrough.WithAdditionalVFIOAliases(additionalVFIOAliases),
 	)
 
 	if m.options.deviceID != "" {

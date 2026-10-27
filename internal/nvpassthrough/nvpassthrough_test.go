@@ -204,3 +204,12 @@ func TestGetAuxDevicesReportsCurrentDriver(t *testing.T) {
 		"0000:16:00.3": "",
 	}, got)
 }
+
+func TestFindBestVFIOVariantAdditionalAliases(t *testing.T) {
+	n := New(WithAdditionalVFIOAliases(map[uint16]string{0x2331: "nvgrace_gpu_vfio_pci"}))
+	device := &nvpci.NvidiaPCIDevice{Address: "0000:01:00.0", Device: 0x2331}
+
+	driver, err := n.FindBestVFIOVariant(device)
+	require.NoError(t, err)
+	require.Equal(t, "nvgrace_gpu_vfio_pci", driver)
+}

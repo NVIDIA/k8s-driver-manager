@@ -47,6 +47,9 @@ type Interface interface {
 type nvpassthrough struct {
 	logger   *logrus.Logger
 	hostRoot string
+	// additionalVFIOAliases maps an NVIDIA PCI device ID to the name of the
+	// VFIO module the device should be bound to.
+	additionalVFIOAliases map[uint16]string
 }
 
 type nvidiaPCIAuxDevice struct {
@@ -87,8 +90,18 @@ func WithHostRoot(hostRoot string) Option {
 	}
 }
 
+// WithAdditionalVFIOAliases provides an Option to set a mapping of NVIDIA PCI
+// device IDs to VFIO module names. A device with an entry in this mapping is
+// bound to the specified module, taking precedence over modules.alias.
+func WithAdditionalVFIOAliases(aliases map[uint16]string) Option {
+	return func(w *nvpassthrough) {
+		w.additionalVFIOAliases = aliases
+	}
+}
+
 // FindBestVFIOVariant finds the "best" match of all vfio_pci aliases for
-// device in the host modules.alias file. This uses the algorithm of
+// device in the host modules.alias file. A user-specified alias for the
+// device's ID (see WithAdditionalVFIOAliases) takes precedence. This uses the algorithm of
 // finding every modules.alias line that begins with "alias vfio_pci:",
 // then picking the one that matches the device's own modalias value
 // (from the file of that name in the device's sysfs directory) with the
@@ -98,6 +111,11 @@ func WithHostRoot(hostRoot string) Option {
 // (cdesiniotis) this code is inspired by:
 // https://gitlab.com/libvirt/libvirt/-/commit/82e2fac297105f554f57fb589002933231b4f711
 func (n *nvpassthrough) FindBestVFIOVariant(device *nvpci.NvidiaPCIDevice) (string, error) {
+	if module, ok := n.additionalVFIOAliases[device.Device]; ok {
+		n.logger.Debugf("Using user-specified vfio driver %s for device %s (device id 0x%04x)", module, device.Address, device.Device)
+		return module, nil
+	}
+
 	modAliasPath := filepath.Join(device.Path, "modalias")
 	modAliasContent, err := os.ReadFile(modAliasPath)
 	if err != nil {
