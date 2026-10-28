@@ -68,7 +68,7 @@ RUN mkdir /busybox \
 COPY scripts/check-busybox-prefer-applets.sh /tmp/check-busybox-prefer-applets.sh
 RUN /tmp/check-busybox-prefer-applets.sh /busybox/busybox
 
-FROM nvcr.io/nvidia/distroless/cc:v4.1.6
+FROM nvcr.io/nvidia/distroless/cc:v4.1.8
 
 ARG VERSION="unknown"
 ARG GIT_COMMIT="unknown"
