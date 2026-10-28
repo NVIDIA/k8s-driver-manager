@@ -25,12 +25,16 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
@@ -430,6 +434,530 @@ func TestRecordedStateIsNotEnforced(t *testing.T) {
 			node := getTestNode(t, clientset)
 			require.False(t, node.Spec.Unschedulable)
 			require.NotContains(t, node.Annotations, nodeInitialUnschedulableAnnotationKey)
+		})
+	}
+}
+
+const (
+	testNamespace = "gpu-operator"
+	testClaimName = "gpu-claim"
+)
+
+func newTestClientWithObjects(objects ...runtime.Object) *Client {
+	return &Client{
+		ctx:       context.Background(),
+		log:       discardLogger(),
+		clientset: fake.NewSimpleClientset(objects...),
+	}
+}
+
+func newTestClaim(name, driver string) *resourcev1.ResourceClaim {
+	return &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name},
+		Status: resourcev1.ResourceClaimStatus{
+			Allocation: &resourcev1.AllocationResult{
+				Devices: resourcev1.DeviceAllocationResult{
+					Results: []resourcev1.DeviceRequestAllocationResult{{Driver: driver}},
+				},
+			},
+		},
+	}
+}
+
+// newStoppedClaimHolder returns a terminating pod that references the claim and whose
+// containers have stopped.
+func newStoppedClaimHolder(name, claimName string) *corev1.Pod {
+	deletionTimestamp := metav1.Now()
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         testNamespace,
+			Name:              name,
+			UID:               types.UID(name + "-uid"),
+			Labels:            map[string]string{"app": "claim-holder"},
+			DeletionTimestamp: &deletionTimestamp,
+			Finalizers:        []string{"test/keep"},
+		},
+		Spec: corev1.PodSpec{
+			NodeName:       testNodeName,
+			ResourceClaims: []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimName: &claimName}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "main",
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}},
+			}},
+		},
+	}
+}
+
+func TestIsPodWaitingForGPUClaimUnprepare(t *testing.T) {
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+
+	testCases := []struct {
+		description string
+		mutate      func(*corev1.Pod)
+		claimDriver string
+		expected    bool
+	}{
+		{
+			description: "terminating pod with stopped containers and a GPU claim",
+			claimDriver: nvidiaDRADriverName,
+			expected:    true,
+		},
+		{
+			description: "containers have not started",
+			mutate: func(pod *corev1.Pod) {
+				pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{}}
+			},
+			claimDriver: nvidiaDRADriverName,
+			expected:    true,
+		},
+		{
+			description: "pod is not terminating",
+			mutate:      func(pod *corev1.Pod) { pod.DeletionTimestamp = nil },
+			claimDriver: nvidiaDRADriverName,
+			expected:    false,
+		},
+		{
+			description: "pod is in a terminal phase",
+			mutate:      func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodSucceeded },
+			claimDriver: nvidiaDRADriverName,
+			expected:    false,
+		},
+		{
+			description: "container is still running",
+			mutate:      func(pod *corev1.Pod) { pod.Status.ContainerStatuses[0].State = running },
+			claimDriver: nvidiaDRADriverName,
+			expected:    false,
+		},
+		{
+			description: "sidecar container is still running",
+			mutate: func(pod *corev1.Pod) {
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "sidecar", State: running}}
+			},
+			claimDriver: nvidiaDRADriverName,
+			expected:    false,
+		},
+		{
+			description: "ephemeral container is still running",
+			mutate: func(pod *corev1.Pod) {
+				pod.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{{Name: "debug", State: running}}
+			},
+			claimDriver: nvidiaDRADriverName,
+			expected:    false,
+		},
+		{
+			description: "claim is allocated by another driver",
+			claimDriver: "other.example.com",
+			expected:    false,
+		},
+		{
+			description: "pod has no claims",
+			mutate:      func(pod *corev1.Pod) { pod.Spec.ResourceClaims = nil },
+			claimDriver: nvidiaDRADriverName,
+			expected:    false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			pod := newStoppedClaimHolder("claim-holder", testClaimName)
+			if tc.mutate != nil {
+				tc.mutate(pod)
+			}
+			client := newTestClientWithObjects(newTestClaim(testClaimName, tc.claimDriver))
+
+			waiting, err := client.IsPodWaitingForGPUClaimUnprepare(*pod)
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, waiting)
+		})
+	}
+}
+
+func TestIsAnyPodReady(t *testing.T) {
+	selector := map[string]string{"app": "kubelet-plugin"}
+
+	newPod := func(name, appLabel string, ready corev1.ConditionStatus, terminating bool) *corev1.Pod {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: testNamespace,
+				Name:      name,
+				Labels:    map[string]string{"app": appLabel},
+			},
+			Spec: corev1.PodSpec{NodeName: testNodeName},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: ready}},
+			},
+		}
+		if terminating {
+			deletionTimestamp := metav1.Now()
+			pod.DeletionTimestamp = &deletionTimestamp
+			pod.Finalizers = []string{"test/keep"}
+		}
+		return pod
+	}
+
+	testCases := []struct {
+		description string
+		pods        []runtime.Object
+		expected    bool
+	}{
+		{
+			description: "no pods",
+			expected:    false,
+		},
+		{
+			description: "ready pod",
+			pods:        []runtime.Object{newPod("plugin", "kubelet-plugin", corev1.ConditionTrue, false)},
+			expected:    true,
+		},
+		{
+			description: "pod is not ready",
+			pods:        []runtime.Object{newPod("plugin", "kubelet-plugin", corev1.ConditionFalse, false)},
+			expected:    false,
+		},
+		{
+			description: "ready pod is terminating",
+			pods:        []runtime.Object{newPod("plugin", "kubelet-plugin", corev1.ConditionTrue, true)},
+			expected:    false,
+		},
+		{
+			description: "ready pod does not match the selector",
+			pods:        []runtime.Object{newPod("other", "other", corev1.ConditionTrue, false)},
+			expected:    false,
+		},
+		{
+			description: "terminating pod and ready replacement",
+			pods: []runtime.Object{
+				newPod("old-plugin", "kubelet-plugin", corev1.ConditionTrue, true),
+				newPod("new-plugin", "kubelet-plugin", corev1.ConditionTrue, false),
+			},
+			expected: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			client := newTestClientWithObjects(tc.pods...)
+
+			ready, err := client.IsAnyPodReady(selector, testNamespace, testNodeName)
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, ready)
+		})
+	}
+}
+
+func TestWaitForPodTerminationExcept(t *testing.T) {
+	selector := map[string]string{"app": "claim-holder"}
+	ignoreFirst := func(pod corev1.Pod) bool { return pod.Name == "first" }
+
+	testCases := []struct {
+		description string
+		pods        []runtime.Object
+		ignore      func(corev1.Pod) bool
+		expectError bool
+	}{
+		{
+			description: "no pods",
+			expectError: false,
+		},
+		{
+			description: "pod remains",
+			pods:        []runtime.Object{newStoppedClaimHolder("first", testClaimName)},
+			expectError: true,
+		},
+		{
+			description: "every remaining pod is ignored",
+			pods:        []runtime.Object{newStoppedClaimHolder("first", testClaimName)},
+			ignore:      ignoreFirst,
+			expectError: false,
+		},
+		{
+			description: "a remaining pod is not ignored",
+			pods: []runtime.Object{
+				newStoppedClaimHolder("first", testClaimName),
+				newStoppedClaimHolder("second", testClaimName),
+			},
+			ignore:      ignoreFirst,
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			client := newTestClientWithObjects(tc.pods...)
+
+			err := client.WaitForPodTerminationExcept(selector, testNamespace, testNodeName, 10*time.Millisecond, tc.ignore)
+			if tc.expectError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestGetGPUResourceClaimHoldersIgnoring(t *testing.T) {
+	completed := newStoppedClaimHolder("completed", "completed-claim")
+	completed.Status.Phase = corev1.PodSucceeded
+
+	client := newTestClientWithObjects(
+		newTestClaim("ignored-claim", nvidiaDRADriverName),
+		newTestClaim("holder-claim", nvidiaDRADriverName),
+		newTestClaim("completed-claim", nvidiaDRADriverName),
+		newStoppedClaimHolder("ignored", "ignored-claim"),
+		newStoppedClaimHolder("holder", "holder-claim"),
+		completed,
+	)
+
+	holders, err := client.GetGPUResourceClaimHolders(testNodeName, func(pod corev1.Pod) bool {
+		return pod.UID == "ignored-uid"
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{testNamespace + "/holder"}, holders)
+
+	holders, err = client.GetGPUResourceClaimHolders(testNodeName, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{testNamespace + "/ignored", testNamespace + "/holder"}, holders)
+}
+
+// newTestComputeDomainClaim returns a claim allocated by the NVIDIA ComputeDomain DRA
+// driver with an opaque config of the given kind, as the ComputeDomain controller creates it.
+func newTestComputeDomainClaim(name, configKind string) *resourcev1.ResourceClaim {
+	claim := newTestClaim(name, computeDomainDRADriverName)
+	claim.Status.Allocation.Devices.Config = []resourcev1.DeviceAllocationConfiguration{{
+		Source:   resourcev1.AllocationConfigSourceClaim,
+		Requests: []string{"daemon"},
+		DeviceConfiguration: resourcev1.DeviceConfiguration{
+			Opaque: &resourcev1.OpaqueDeviceConfiguration{
+				Driver: computeDomainDRADriverName,
+				Parameters: runtime.RawExtension{
+					Raw: []byte(`{"apiVersion":"resource.nvidia.com/v1beta1","kind":"` + configKind + `","domainID":"test-domain"}`),
+				},
+			},
+		},
+	}}
+	return claim
+}
+
+func TestIsAllocatedComputeDomainDaemonClaim(t *testing.T) {
+	testCases := []struct {
+		description string
+		claim       *resourcev1.ResourceClaim
+		expected    bool
+	}{
+		{
+			description: "daemon claim",
+			claim:       newTestComputeDomainClaim(testClaimName, computeDomainDaemonConfigKind),
+			expected:    true,
+		},
+		{
+			description: "channel claim",
+			claim:       newTestComputeDomainClaim(testClaimName, "ComputeDomainChannelConfig"),
+			expected:    false,
+		},
+		{
+			description: "GPU claim",
+			claim:       newTestClaim(testClaimName, nvidiaDRADriverName),
+			expected:    false,
+		},
+		{
+			description: "daemon claim is not allocated",
+			claim: func() *resourcev1.ResourceClaim {
+				claim := newTestComputeDomainClaim(testClaimName, computeDomainDaemonConfigKind)
+				claim.Status.Allocation = nil
+				return claim
+			}(),
+			expected: false,
+		},
+		{
+			description: "daemon config is for another driver",
+			claim: func() *resourcev1.ResourceClaim {
+				claim := newTestComputeDomainClaim(testClaimName, computeDomainDaemonConfigKind)
+				claim.Status.Allocation.Devices.Config[0].Opaque.Driver = "other.example.com"
+				return claim
+			}(),
+			expected: false,
+		},
+		{
+			description: "config parameters are not valid JSON",
+			claim: func() *resourcev1.ResourceClaim {
+				claim := newTestComputeDomainClaim(testClaimName, computeDomainDaemonConfigKind)
+				claim.Status.Allocation.Devices.Config[0].Opaque.Parameters.Raw = []byte("not json")
+				return claim
+			}(),
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			require.Equal(t, tc.expected, isAllocatedComputeDomainDaemonClaim(tc.claim))
+		})
+	}
+}
+
+func TestWaitForComputeDomainDaemons(t *testing.T) {
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	// newDaemonPod returns a running IMEX daemon pod that is not terminating.
+	newDaemonPod := func() *corev1.Pod {
+		pod := newStoppedClaimHolder("imex-daemon", "daemon-claim")
+		pod.DeletionTimestamp = nil
+		pod.Finalizers = nil
+		pod.Status.ContainerStatuses[0].State = running
+		return pod
+	}
+
+	testCases := []struct {
+		description string
+		pods        []runtime.Object
+		expectError bool
+	}{
+		{
+			description: "no pods",
+			expectError: false,
+		},
+		{
+			description: "daemon pod is running",
+			pods:        []runtime.Object{newDaemonPod()},
+			expectError: true,
+		},
+		{
+			description: "daemon pod is terminating and its container is still running",
+			pods: []runtime.Object{func() *corev1.Pod {
+				pod := newStoppedClaimHolder("imex-daemon", "daemon-claim")
+				pod.Status.ContainerStatuses[0].State = running
+				return pod
+			}()},
+			expectError: true,
+		},
+		{
+			description: "daemon pod is terminating and its containers have stopped",
+			pods:        []runtime.Object{newStoppedClaimHolder("imex-daemon", "daemon-claim")},
+			expectError: false,
+		},
+		{
+			description: "daemon pod is in a terminal phase",
+			pods: []runtime.Object{func() *corev1.Pod {
+				pod := newDaemonPod()
+				pod.Status.Phase = corev1.PodSucceeded
+				return pod
+			}()},
+			expectError: false,
+		},
+		{
+			description: "running pods hold only channel and GPU claims",
+			pods: []runtime.Object{func() *corev1.Pod {
+				pod := newDaemonPod()
+				pod.Name = "workload"
+				channelClaim, gpuClaim := "channel-claim", "gpu-claim"
+				pod.Spec.ResourceClaims = []corev1.PodResourceClaim{
+					{Name: "channel", ResourceClaimName: &channelClaim},
+					{Name: "gpu", ResourceClaimName: &gpuClaim},
+				}
+				return pod
+			}()},
+			expectError: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			objects := append([]runtime.Object{
+				newTestComputeDomainClaim("daemon-claim", computeDomainDaemonConfigKind),
+				newTestComputeDomainClaim("channel-claim", "ComputeDomainChannelConfig"),
+				newTestClaim("gpu-claim", nvidiaDRADriverName),
+			}, tc.pods...)
+			client := newTestClientWithObjects(objects...)
+
+			err := client.WaitForComputeDomainDaemons(testNodeName, 10*time.Millisecond)
+			if tc.expectError {
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestDeleteOrEvictPodsIgnoring(t *testing.T) {
+	setController := func(pod *corev1.Pod, kind, name string) *corev1.Pod {
+		controller := true
+		pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: kind, Name: name, Controller: &controller}}
+		return pod
+	}
+	daemonSet := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "dra-validator"}}
+	// A GPU Operator pod that waitForPodsToTerminate stopped waiting for: a terminating
+	// DaemonSet pod that still holds a GPU claim.
+	newSkippedPod := func() runtime.Object {
+		return setController(newStoppedClaimHolder("validator", "validator-claim"), "DaemonSet", daemonSet.Name)
+	}
+	// A running user pod that holds a GPU claim.
+	newWorkloadPod := func() runtime.Object {
+		pod := setController(newStoppedClaimHolder("workload", "workload-claim"), "ReplicaSet", "workload")
+		pod.DeletionTimestamp = nil
+		pod.Finalizers = nil
+		pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+		return pod
+	}
+	ignoreSkippedPod := func(pod corev1.Pod) bool { return pod.UID == "validator-uid" }
+
+	testCases := []struct {
+		description   string
+		pods          []runtime.Object
+		ignore        func(corev1.Pod) bool
+		expectError   bool
+		remainingPods []string
+	}{
+		{
+			description:   "skipped pod is counted, but the drain helper does not delete DaemonSet pods",
+			pods:          []runtime.Object{newSkippedPod()},
+			expectError:   true,
+			remainingPods: []string{"validator"},
+		},
+		{
+			description:   "skipped pod is ignored",
+			pods:          []runtime.Object{newSkippedPod()},
+			ignore:        ignoreSkippedPod,
+			expectError:   false,
+			remainingPods: []string{"validator"},
+		},
+		{
+			description:   "user pod is deleted while the skipped pod is ignored",
+			pods:          []runtime.Object{newSkippedPod(), newWorkloadPod()},
+			ignore:        ignoreSkippedPod,
+			expectError:   false,
+			remainingPods: []string{"validator"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			objects := append([]runtime.Object{
+				daemonSet,
+				newTestClaim("validator-claim", nvidiaDRADriverName),
+				newTestClaim("workload-claim", nvidiaDRADriverName),
+			}, tc.pods...)
+			clientset := fake.NewSimpleClientset(objects...)
+			// Discovery without the eviction subresource makes the drain helper delete pods.
+			clientset.Resources = []*metav1.APIResourceList{{GroupVersion: "v1"}}
+			client := &Client{ctx: context.Background(), log: discardLogger(), clientset: clientset}
+
+			err := client.DeleteOrEvictPods(testNodeName, DrainOptions{}, tc.ignore)
+			if tc.expectError {
+				require.ErrorContains(t, err, "failed to delete all GPU pods")
+			} else {
+				require.NoError(t, err)
+			}
+
+			pods, err := clientset.CoreV1().Pods(testNamespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			var remaining []string
+			for _, pod := range pods.Items {
+				remaining = append(remaining, pod.Name)
+			}
+			require.ElementsMatch(t, tc.remainingPods, remaining)
 		})
 	}
 }
