@@ -961,3 +961,81 @@ func TestDeleteOrEvictPodsIgnoring(t *testing.T) {
 		})
 	}
 }
+
+func TestDrainNode(t *testing.T) {
+	newPod := func(name, controllerKind string, phase corev1.PodPhase) *corev1.Pod {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name, UID: types.UID(name + "-uid")},
+			Spec: corev1.PodSpec{
+				NodeName:   testNodeName,
+				Containers: []corev1.Container{{Name: "ctr"}},
+			},
+			Status: corev1.PodStatus{Phase: phase},
+		}
+		if controllerKind != "" {
+			controller := true
+			pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: controllerKind, Name: controllerKind + "-owner", Controller: &controller}}
+		}
+		return pod
+	}
+	daemonSet := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "DaemonSet-owner"}}
+
+	testCases := []struct {
+		description   string
+		objects       []runtime.Object
+		drainOpts     DrainOptions
+		remainingPods []string
+	}{
+		{
+			description: "DaemonSet pods, such as the driver pod running driver-manager, are left on the node",
+			objects: []runtime.Object{
+				daemonSet,
+				newPod("nvidia-driver-daemonset", "DaemonSet", corev1.PodPending),
+				newPod("workload", "ReplicaSet", corev1.PodRunning),
+			},
+			remainingPods: []string{"nvidia-driver-daemonset"},
+		},
+		{
+			description: "pods are deleted with their own termination grace period",
+			objects: []runtime.Object{
+				newPod("workload", "ReplicaSet", corev1.PodRunning),
+			},
+		},
+		{
+			description: "unmanaged pods are deleted with a warning when force is set",
+			objects: []runtime.Object{
+				newPod("unmanaged", "", corev1.PodRunning),
+			},
+			drainOpts: DrainOptions{Force: true},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			clientset := fake.NewSimpleClientset(tc.objects...)
+			// Discovery without the eviction subresource makes the drain helper delete pods.
+			clientset.Resources = []*metav1.APIResourceList{{GroupVersion: "v1"}}
+			client := &Client{ctx: context.Background(), log: discardLogger(), clientset: clientset}
+
+			var err error
+			require.NotPanics(t, func() { err = client.DrainNode(testNodeName, tc.drainOpts) })
+			require.NoError(t, err)
+
+			pods, err := clientset.CoreV1().Pods(testNamespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			var remaining []string
+			for _, pod := range pods.Items {
+				remaining = append(remaining, pod.Name)
+			}
+			require.ElementsMatch(t, tc.remainingPods, remaining)
+
+			// Like kubectl drain, pods are deleted with their own termination grace
+			// period, not immediately.
+			for _, action := range clientset.Actions() {
+				if deleteAction, ok := action.(k8stesting.DeleteAction); ok && deleteAction.GetResource().Resource == "pods" {
+					require.Nil(t, deleteAction.GetDeleteOptions().GracePeriodSeconds, "pod %s", deleteAction.GetName())
+				}
+			}
+		})
+	}
+}
