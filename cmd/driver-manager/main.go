@@ -79,8 +79,8 @@ const (
 	// nvidiaDriverManagerCordonAnnotation marks a cordon applied by driver-manager, since
 	// Node.Spec.Unschedulable does not record who set it.
 	nvidiaDriverManagerCordonAnnotation = nvidiaDomainPrefix + "/" + "gpu-driver-manager.node-cordoned"
-	// nvidiaUpgradeControllerCordonAnnotation is the ownership marker proposed for the upgrade
-	// controller, which does not write it yet.
+	// nvidiaUpgradeControllerCordonAnnotation marks a cordon applied by the GPU driver upgrade
+	// controller in k8s-operator-libs.
 	nvidiaUpgradeControllerCordonAnnotation = nvidiaDomainPrefix + "/" + "gpu-driver-upgrade-controller.node-cordoned"
 )
 
@@ -376,12 +376,6 @@ func (dm *DriverManager) uninstallDriver() error {
 			return fmt.Errorf("failed to reschedule GPU operator components: %w", err)
 		}
 		return nil
-	}
-
-	// Wait out an external cordon before evicting anything, so the node keeps running
-	// untouched while it is in place.
-	if err := dm.waitForExternalCordonToClear(); err != nil {
-		return err
 	}
 
 	// Always evict all GPU operator components across a driver restart. The DRA
@@ -1240,59 +1234,11 @@ func (dm *DriverManager) isGPUPodEvictionEnabled() bool {
 	return dm.config.enableGPUPodEviction
 }
 
-// waitForExternalCordonToClear blocks while the node is cordoned by someone other than
-// GPU Operator. A GPU-owned cordon is in-progress operator work and does not block.
-func (dm *DriverManager) waitForExternalCordonToClear() error {
-	err := dm.kubeClient.WaitUntilNoExternalCordon(dm.config.nodeName,
-		nvidiaDriverManagerCordonAnnotation, nvidiaUpgradeControllerCordonAnnotation)
-	if err != nil {
-		return fmt.Errorf("failed while waiting for an external cordon on node %s to clear: %w",
-			dm.config.nodeName, err)
-	}
-	return nil
-}
-
 // clearStaleCordonClaim is best effort and must not block the driver install.
 func (dm *DriverManager) clearStaleCordonClaim() {
 	if err := dm.kubeClient.ClearStaleCordonClaim(dm.config.nodeName, nvidiaDriverManagerCordonAnnotation); err != nil {
 		dm.log.Warnf("Failed to clear stale cordon claim on node %s: %v", dm.config.nodeName, err)
 	}
-}
-
-// cordonNode cordons the node and records driver-manager as its owner. An existing external
-// cordon is waited out rather than taken over.
-func (dm *DriverManager) cordonNode() error {
-	for {
-		if err := dm.waitForExternalCordonToClear(); err != nil {
-			return err
-		}
-		var acquired bool
-		err := retryOnAnyError(dm.ctx, dm.log, retryBackoff(defaultCordonRetries),
-			fmt.Sprintf("cordon node %s", dm.config.nodeName), func() error {
-				var err error
-				acquired, err = dm.kubeClient.AcquireNodeCordon(dm.config.nodeName,
-					nvidiaDriverManagerCordonAnnotation, nvidiaUpgradeControllerCordonAnnotation)
-				return err
-			})
-		if err != nil {
-			return err
-		}
-		if acquired {
-			return nil
-		}
-		dm.log.Infof("Node %s was recordoned by an external actor before the claim could be recorded, waiting again", dm.config.nodeName)
-	}
-}
-
-// uncordonNode releases the cordon only when driver-manager applied it; anyone else's
-// cordon is left in place.
-func (dm *DriverManager) uncordonNode() error {
-	return retryOnAnyError(dm.ctx, dm.log, retryBackoff(defaultCordonRetries),
-		fmt.Sprintf("uncordon node %s", dm.config.nodeName),
-		func() error {
-			return dm.kubeClient.ReleaseNodeCordon(dm.config.nodeName,
-				nvidiaDriverManagerCordonAnnotation, nvidiaUpgradeControllerCordonAnnotation)
-		})
 }
 
 func (dm *DriverManager) nvDrainNode() error {
@@ -1318,6 +1264,28 @@ func (dm *DriverManager) isDriverAutoUpgradePolicyEnabled() bool {
 	}
 	dm.log.Info("Auto upgrade policy of the GPU driver on the node is disabled")
 	return false
+}
+
+// cordonNode and uncordonNode wrap the kube client calls with this command's
+// retry policy. The policy lives here rather than in the client so the client
+// stays a thin wrapper over the Kubernetes API.
+func (dm *DriverManager) cordonNode() error {
+	return retryOnAnyError(dm.ctx, dm.log, retryBackoff(defaultCordonRetries),
+		fmt.Sprintf("cordon node %s", dm.config.nodeName),
+		func() error {
+			return dm.kubeClient.AcquireNodeCordon(dm.config.nodeName, nvidiaDriverManagerCordonAnnotation)
+		})
+}
+
+// uncordonNode restores the node's recorded state, leaving a cordon another
+// GPU component still holds in place.
+func (dm *DriverManager) uncordonNode() error {
+	return retryOnAnyError(dm.ctx, dm.log, retryBackoff(defaultCordonRetries),
+		fmt.Sprintf("uncordon node %s", dm.config.nodeName),
+		func() error {
+			return dm.kubeClient.ReleaseNodeCordon(dm.config.nodeName,
+				nvidiaDriverManagerCordonAnnotation, nvidiaUpgradeControllerCordonAnnotation)
+		})
 }
 
 func (dm *DriverManager) cleanupOnFailure() {
