@@ -17,11 +17,9 @@
         "deployments/devel/Dockerfile"
       ],
       "matchStrings": [
-        "FROM golang:(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+        "FROM (?<depName>\\S+):(?<currentValue>[^\\s@]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
       ],
-      "depNameTemplate": "go",
-      "datasourceTemplate": "golang-version",
-      "versioningTemplate": "semver"
+      "datasourceTemplate": "docker"
     }
   ],
   "labels": [
