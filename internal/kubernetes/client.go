@@ -408,12 +408,23 @@ func (c *Client) WaitForComputeDomainDaemons(nodeName string, timeout time.Durat
 func (c *Client) DrainNode(nodeName string, drainOpts DrainOptions) error {
 	c.log.Infof("Draining node %s", nodeName)
 
+	// Match the defaults of `kubectl drain --ignore-daemonsets`: DaemonSet pods,
+	// including the driver pod this runs in, cannot be drained, pods keep their own
+	// termination grace period, evictions blocked by a PodDisruptionBudget are
+	// retried after a delay, and the helper needs writers for its progress and
+	// warning messages.
 	drainHelper := &drain.Helper{
-		Ctx:                c.ctx,
-		Client:             c.clientset,
-		Force:              drainOpts.Force,
-		DeleteEmptyDirData: drainOpts.DeleteEmptyDirData,
-		Timeout:            drainOpts.Timeout,
+		Ctx:                  c.ctx,
+		Client:               c.clientset,
+		Out:                  os.Stdout,
+		ErrOut:               os.Stderr,
+		ChunkSize:            cmdutil.DefaultChunkSize,
+		GracePeriodSeconds:   -1,
+		EvictErrorRetryDelay: 5 * time.Second,
+		IgnoreAllDaemonSets:  true,
+		Force:                drainOpts.Force,
+		DeleteEmptyDirData:   drainOpts.DeleteEmptyDirData,
+		Timeout:              drainOpts.Timeout,
 	}
 
 	if drainOpts.PodSelector != "" {
