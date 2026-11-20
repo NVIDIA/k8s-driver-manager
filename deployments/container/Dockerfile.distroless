@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM nvcr.io/nvidia/cuda:13.5.0-base-ubi9 AS build
+FROM nvcr.io/nvidia/cuda:13.5.0-base-ubi9@sha256:d4d8d2916e01aca605e786bc55abae49f1c2c3f7fc61ef1c5540a7a1c1806f70 AS build
 
 WORKDIR /work
 
@@ -58,7 +58,7 @@ ARG TARGETARCH
 # Build a static busybox layout: one binary plus applet symlinks (sh, rm,
 # ln, sleep, cat, ...) so PATH-resolved commands in init-container wrappers
 # and lifecycle hooks keep working on the non-*-dev* distroless base.
-FROM busybox:1.37.0-musl AS shell
+FROM busybox:1.37.0-musl@sha256:f6a95d611e0a8780fabdb2aec43e31275b2720dfefa3e41b16835bfc42454478 AS shell
 RUN mkdir /busybox \
  && cp /bin/busybox /busybox/busybox \
  && /busybox/busybox --install -s /busybox
@@ -68,7 +68,7 @@ RUN mkdir /busybox \
 COPY scripts/check-busybox-prefer-applets.sh /tmp/check-busybox-prefer-applets.sh
 RUN /tmp/check-busybox-prefer-applets.sh /busybox/busybox
 
-FROM nvcr.io/nvidia/distroless/cc:v4.2.2
+FROM nvcr.io/nvidia/distroless/cc:v4.2.2@sha256:673e4dab750fdacf481d774ce99ed6aba573e5cf9ac0525237d99666c922d9d2
 
 ARG VERSION="unknown"
 ARG GIT_COMMIT="unknown"
